@@ -1,0 +1,206 @@
+EMEA-UK-LON-THN2-MBL51#sh interfaces status 
+Port       Name                                                 Status       Vlan       Duplex Speed  Type                Flags Encapsulation
+Et1        [DXC][BW]10G[RED]EMEA-UK-LON-THN2-ADC01[INT]1/1.6    connected    in Po1028  full   10G    10GBASE-SRL                           
+Et2        [DXC][BW]10G[RED]EMEA-UK-LON-THN2-ADC01[INT]2/1.6    connected    in Po1028  full   10G    10GBASE-SRL                           
+Et3        [DXC][BW]10G[RED]EMEA-UK-LON-THN2-MNT51[INT]ETH2     connected    routed     full   10G    10GBASE-SRL                           
+Et4        SPARE                                                disabled     999        full   10G    10GBASE-SRL                           
+Et5        SPARE                                                disabled     999        full   10G    10GBASE-SRL                           
+Et6        SPARE                                                disabled     999        full   10G    10GBASE-SRL                           
+Et7        SPARE                                                disabled     999        full   10G    10GBASE-SRL    
+
+
+EMEA-UK-LON-THN2-MBL51#sh ip int br
+                                                                                     Address
+Interface              IP Address            Status       Protocol            MTU    Owner  
+---------------------- --------------------- ------------ -------------- ----------- -------
+Ethernet3              10.4.231.3/31         up           up                 1500           
+Ethernet49/1           10.4.224.0/31         up           up                 9214           
+Ethernet50/1           10.4.224.128/31       up           up                 9214           
+Ethernet51/1           10.4.225.0/31         up           up                 9214           
+Ethernet54/1           unassigned            down           up  
+
+EMEA-UK-LON-THN2-MBL51#sh bgp summary 
+BGP summary information for VRF default
+Router identifier 10.4.228.5, local AS number 64100.21005
+Neighbor              AS Session State AFI/SAFI                AFI/SAFI State   NLRI Rcd   NLRI Acc
+------------ ----------- ------------- ----------------------- -------------- ---------- ----------
+10.4.224.1   64100.21001 Established   IPv4 Unicast            Negotiated             59         59
+10.4.224.129 64100.21002 Established   IPv4 Unicast            Negotiated             58         58
+10.4.225.1   64100.21003 Established   IPv4 Unicast            Negotiated             58         58
+10.4.228.1   64100.21001 Established   L2VPN EVPN              Negotiated           3861       3861
+10.4.228.2   64100.21002 Established   L2VPN EVPN              Negotiated           3862       3862
+10.4.228.3   64100.21003 Established   L2VPN EVPN              Negotiated           3862       3862
+EMEA-UK-LON-THN2-MBL51#
+
+EMEA-UK-LON-THN2-MBL51#sh bgp evpn summary 
+BGP summary information for VRF default
+Router identifier 10.4.228.5, local AS number 64100.21005
+Neighbor Status Codes: m - Under maintenance
+  Neighbor   V AS           MsgRcvd   MsgSent  InQ OutQ  Up/Down State   PfxRcd PfxAcc
+  10.4.228.1 4 64100.21001  10817487  12924096    0    0  191d18h Estab   3839   3839
+  10.4.228.2 4 64100.21002  11105592  12825782    0    0  191d18h Estab   3840   3840
+  10.4.228.3 4 64100.21003  11452560  11261995    0    0  191d19h Estab   3840   3840
+EMEA-UK-LON-THN2-MBL51#
+
+EMEA-UK-LON-THN2-MBL51#show vxlan vtep detail 
+Remote VTEPS for Vxlan1:
+
+VTEP               Learned Via         MAC Address Learning       Tunnel Type(s)
+------------------ ------------------- -------------------------- --------------
+10.4.228.106       control plane       control plane              unicast, flood
+10.4.228.107       control plane       control plane              unicast, flood
+10.4.228.108       control plane       control plane              unicast, flood
+10.4.228.109       control plane       control plane              unicast, flood
+10.4.228.110       control plane       control plane              unicast, flood
+10.4.228.111       control plane       control plane              unicast, flood
+10.4.228.112       control plane       control plane              unicast, flood
+10.4.228.113       control plane       control plane              unicast, flood
+10.4.228.114       control plane       control plane              unicast, flood
+10.4.228.115       control plane       control plane              unicast, flood
+10.4.228.116       control plane       control plane              unicast, flood
+
+Total number of remote VTEPS:  11
+EMEA-UK-LON-THN2-MBL51#
+EMEA-UK-LON-THN2-MBL51#
+EMEA-UK-LON-THN2-MBL51#show mac address-table dynamic 
+          Mac Address Table
+------------------------------------------------------------------
+
+Vlan    Mac Address       Type        Ports      Moves   Last Move
+----    -----------       ----        -----      -----   ---------
+1400    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+1401    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+1402    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+1403    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+1404    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+1405    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+1406    0094.a134.8e6b    DYNAMIC     Po1028     1       193 days, 4:11:50 ago
+1406    0094.a134.a86b    DYNAMIC     Vx1        1       193 days, 3:36:03 ago
+1407    0094.a134.8e60    DYNAMIC     Po1028     1       25 days, 4:52:54 ago
+1407    0094.a134.a860    DYNAMIC     Vx1        1       25 days, 4:08:04 ago
+1408    0009.0f09.081e    DYNAMIC     Po1027     1       95 days, 7:10:02 ago
+Total Mac Addresses for this criterion: 16
+
+          Multicast Mac Address Table
+------------------------------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       ----        -----
+Total Mac Addresses for this criterion: 0
+EMEA-UK-LON-THN2-MBL51#show mac address-table static 
+          Mac Address Table
+------------------------------------------------------------------
+
+Vlan    Mac Address       Type        Ports      Moves   Last Move
+----    -----------       ----        -----      -----   ---------
+1400    001c.73aa.bbcc    STATIC      Router
+1400    2cdd.e959.81e1    STATIC      Router
+1401    001c.73aa.bbcc    STATIC      Router
+1401    2cdd.e959.81e1    STATIC      Router
+1402    001c.73aa.bbcc    STATIC      Router
+1402    2cdd.e959.81e1    STATIC      Router
+1403    001c.73aa.bbcc    STATIC      Router
+1403    2cdd.e959.81e1    STATIC      Router
+1404    001c.73aa.bbcc    STATIC      Router
+1404    2cdd.e959.81e1    STATIC      Router
+1405    001c.73aa.bbcc    STATIC      Router
+1405    2cdd.e959.81e1    STATIC      Router
+1406    001c.73aa.bbcc    STATIC      Router
+1406    2cdd.e959.81e1    STATIC      Router
+1407    001c.73aa.bbcc    STATIC      Router
+1407    2cdd.e959.81e1    STATIC      Router
+1408    001c.73aa.bbcc    STATIC      Router
+1408    2cdd.e959.81e1    STATIC      Router
+1409    001c.73aa.bbcc    STATIC      Router
+1409    2cdd.e959.81e1    STATIC      Router
+1410    001c.73aa.bbcc    STATIC      Router
+1410    2cdd.e959.81e1    STATIC      Router
+1411    001c.73aa.bbcc    STATIC      Router
+1411    2cdd.e959.81e1    STATIC      Router
+1412    001c.73aa.bbcc    STATIC      Router
+1412    2cdd.e959.81e1    STATIC      Router
+1413    001c.73aa.bbcc    STATIC      Router
+1413    2cdd.e959.81e1    STATIC      Router
+4054    001c.73aa.bbcc    STATIC      Router
+4054    2cdd.e959.81e1    STATIC      Router
+4055    001c.73aa.bbcc    STATIC      Router
+4055    2cdd.e959.81e1    STATIC      Router
+4056    001c.73aa.bbcc    STATIC      Router
+4056    2cdd.e959.81e1    STATIC      Router
+4057    001c.73aa.bbcc    STATIC      Router
+4057    2cdd.e959.81e1    STATIC      Router
+4058    001c.73aa.bbcc    STATIC      Router
+4058    2cdd.e959.81e1    STATIC      Router
+4059    001c.73aa.bbcc    STATIC      Router
+4059    2cdd.e959.81e1    STATIC      Router
+4060    001c.73aa.bbcc    STATIC      Router
+4060    2cdd.e959.81e1    STATIC      Router
+4061    001c.73aa.bbcc    STATIC      Router
+4061    2cdd.e959.81e1    STATIC      Router
+4062    001c.73aa.bbcc    STATIC      Router
+4062    2cdd.e959.81e1    STATIC      Router
+4063    001c.73aa.bbcc    STATIC      Router
+4063    2cdd.e959.81e1    STATIC      Router
+4064    001c.73aa.bbcc    STATIC      Router
+4064    2cdd.e959.81e1    STATIC      Router
+4066    001c.73aa.bbcc    STATIC      Router
+4066    2cdd.e959.81e1    STATIC      Router
+4067    001c.73aa.bbcc    STATIC      Router
+4067    2cdd.e959.81e1    STATIC      Router
+4068    001c.73aa.bbcc    STATIC      Router
+4068    2cdd.e959.81e1    STATIC      Router
+4069    001c.73aa.bbcc    STATIC      Router
+4069    2cdd.e959.81e1    STATIC      Router
+4070    001c.73aa.bbcc    STATIC      Router
+4070    2cdd.e959.81e1    STATIC      Router
+4071    001c.73aa.bbcc    STATIC      Router
+4071    2cdd.e959.81e1    STATIC      Router
+4073    001c.73aa.bbcc    STATIC      Router
+4073    2cdd.e959.81e1    STATIC      Router
+4074    001c.73aa.bbcc    STATIC      Router
+4074    2cdd.e959.81e1    STATIC      Router
+4075    001c.73aa.bbcc    STATIC      Router
+4075    2cdd.e959.81e1    STATIC      Router
+4076    001c.73aa.bbcc    STATIC      Router
+4076    2cdd.e959.81e1    STATIC      Router
+4077    001c.73aa.bbcc    STATIC      Router
+4077    2cdd.e959.81e1    STATIC      Router
+4078    001c.73aa.bbcc    STATIC      Router
+4078    2cdd.e959.81e1    STATIC      Router
+4079    001c.73aa.bbcc    STATIC      Router
+4079    2cdd.e959.81e1    STATIC      Router
+4080    001c.73aa.bbcc    STATIC      Router
+4080    2cdd.e959.81e1    STATIC      Router
+4081    001c.73aa.bbcc    STATIC      Router
+4081    2cdd.e959.81e1    STATIC      Router
+4082    001c.73aa.bbcc    STATIC      Router
+4082    2cdd.e959.81e1    STATIC      Router
+4083    001c.73aa.bbcc    STATIC      Router
+4083    2cdd.e959.81e1    STATIC      Router
+4084    001c.73aa.bbcc    STATIC      Router
+4084    2cdd.e959.81e1    STATIC      Router
+4085    001c.73aa.bbcc    STATIC      Router
+4085    2cdd.e959.81e1    STATIC      Router
+4086    001c.73aa.bbcc    STATIC      Router
+4086    2cdd.e959.81e1    STATIC      Router
+4087    001c.73aa.bbcc    STATIC      Router
+4087    2cdd.e959.81e1    STATIC      Router
+4088    001c.73aa.bbcc    STATIC      Router
+4088    2cdd.e959.81e1    STATIC      Router
+4089    001c.73aa.bbcc    STATIC      Router
+4089    2cdd.e959.81e1    STATIC      Router
+4090    001c.73aa.bbcc    STATIC      Router
+4090    2cdd.e959.81e1    STATIC      Router
+4091    001c.73aa.bbcc    STATIC      Router
+4091    2cdd.e959.81e1    STATIC      Router
+4092    001c.73aa.bbcc    STATIC      Router
+4092    2cdd.e959.81e1    STATIC      Router
+Total Mac Addresses for this criterion: 106
+
+          Multicast Mac Address Table
+------------------------------------------------------------------
+
+Vlan    Mac Address       Type        Ports
+----    -----------       ----        -----
+Total Mac Addresses for this criterion: 0
+EMEA-UK-LON-THN2-MBL51#                     
