@@ -203,4 +203,31 @@ Total Mac Addresses for this criterion: 106
 Vlan    Mac Address       Type        Ports
 ----    -----------       ----        -----
 Total Mac Addresses for this criterion: 0
-EMEA-UK-LON-THN2-MBL51#                     
+EMEA-UK-LON-THN2-MBL51#
+
+
+EMEA-UK-LON-THN2-MBL51#
+EMEA-UK-LON-THN2-MBL51#show  vrf summary 
+VRF count: 14
+VRF up count: 14
+VRF IPv4 routing count: 14
+VRF IPv6 routing count: 0
+EMEA-UK-LON-THN2-MBL51#
+EMEA-UK-LON-THN2-MBL51#show vrf reserved-ports 
+   VRF                       Reserved ports    Comment
+------------------------- -------------------- -------
+   management                None                     
+   CMN-DEV-LE                None                     
+   CMN-QA-LE                 None                     
+   CMN-E2E-LE                None                     
+   CMN-FXI-MIT               None                     
+   CMN-QA-TQ                 None                     
+   NON-PROD-EXTERNAL         None                     
+   CMN-PRE-PROD-TE           None                     
+   CMN-QA-TE                 None                     
+   CMN-DEV-MIT               None                      
+   CMN-PRE-PROD-LE           None                     
+   CMN-PRE-PROD-SHARED       None                     
+   CMN-PRE-PROD-TQ           None                     
+
+EMEA-UK-LON-THN2-MBL51#

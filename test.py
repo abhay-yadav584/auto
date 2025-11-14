@@ -330,53 +330,100 @@ def parse_mac_address_tables(raw: str):
                 break
     return dynamic_count, static_count
 
+def parse_vrf_reserved_ports(raw: str) -> list[str]:
+    """Return list of VRF names from 'show vrf reserved-ports' output (fallback)."""
+    lines = raw.splitlines()
+    start = None
+    block = []
+    for line in lines:
+        low = line.lower()
+        if "#show vrf reserved-ports" in low or "#sh vrf reserved-ports" in low:
+            start = 1
+            continue
+        if start:
+            if low.endswith("#") and "vrf reserved-ports" not in low:
+                break
+            block.append(line.rstrip())
+    if not block:
+        return []
+    data = [
+        l for l in block
+        if l.strip()
+        and not l.lstrip().lower().startswith("vrf")
+        and not re.fullmatch(r'[-\s]+', l)
+    ]
+    vrfs = []
+    for l in data:
+        parts = re.split(r'\s{2,}', l.strip())
+        if parts and parts[0]:
+            vrfs.append(parts[0].strip())
+    return vrfs
+
 def main():
-    raw = load_raw()
+    try:
+        raw = load_raw()
+    except FileNotFoundError as e:
+        print(str(e))
+        return
+    if not raw.strip():
+        print("Raw input empty.")
+        return
+    print(f"Raw input length: {len(raw)} characters")
     iface = Interfaces(raw)
     bgp = BGP(raw)
 
-    # Interfaces status
     print("Command: sh interfaces status")
     connected, disabled = iface.parse_interfaces_status()
     print(f"Connected interfaces: {connected}")
     print(f"Disabled interfaces: {disabled}")
 
-    # IP brief
     print("\nCommand: sh ip int br")
     ip_up, ip_down = iface.parse_ip_brief()
     print(f"IP interfaces UP: {ip_up}")
     print(f"IP interfaces DOWN: {ip_down}")
 
-    # BGP summary
     print("\nCommand: sh bgp summary")
     bgp_total, bgp_est, nlri_rows = bgp.parse_bgp_summary()
     print(f"BGP neighbors total: {bgp_total}")
     print(f"BGP neighbors established: {bgp_est}")
     print_nlri_table(nlri_rows)
 
-    # BGP EVPN summary
     print("\nCommand: sh bgp evpn summary")
     evpn_rows = bgp.parse_bgp_evpn_summary()
     print_evpn_table(evpn_rows)
+
     print("\nEVPN Neighbor Prefix Detail:")
     for r in evpn_rows:
         print(f"{r['neighbor']}: PfxRcd={r['pfx_rcd']} PfxAcc={r['pfx_acc']}")
 
-    # VXLAN VTEP detail
-    print("\nCommand: show vxlan vtep detail")
-    vteps = parse_vxlan_vtep_detail(raw)
-    print(f"Remote VTEP count: {len(vteps)}")
-    for ip in vteps:
-        print(f"VTEP: {ip}")
-
-    # MAC address-table dynamic/static via NetworkParsers
+    # MAC tables
     print("\nCommand: show mac address-table dynamic")
-    dyn_count = PARSER.count_mac_dynamic(raw)
+    dyn_count, stat_count = parse_mac_address_tables(raw)
     print(f"Dynamic MAC entries: {dyn_count}")
 
     print("\nCommand: show mac address-table static")
-    stat_count = PARSER.count_mac_static(raw)
     print(f"Static MAC entries: {stat_count}")
+
+    # VRF summary
+    print("\nCommand: show vrf summary")
+    vrf_summary = PARSER.parse_vrf_summary(raw)
+    if vrf_summary.get("vrf_count") is not None:
+        print(f"VRF count: {vrf_summary['vrf_count']}")
+        print(f"VRF up count: {vrf_summary['vrf_up']}")
+        print(f"VRF IPv4 routing count: {vrf_summary['vrf_ipv4']}")
+        print(f"VRF IPv6 routing count: {vrf_summary['vrf_ipv6']}")
+    else:
+        print("VRF summary: not found")
+
+    # VRF reserved-ports
+    print("\nCommand: show vrf reserved-ports")
+    vrf_reserved = PARSER.parse_vrf_reserved_ports_names(raw)
+    if not vrf_reserved:
+        vrf_reserved = parse_vrf_reserved_ports(raw)
+    print(f"VRF reserved-ports count: {len(vrf_reserved)}")
+    for name in vrf_reserved:
+        print(name)
 
 if __name__ == "__main__":
     main()
+
