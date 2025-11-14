@@ -231,3 +231,95 @@ EMEA-UK-LON-THN2-MBL51#show vrf reserved-ports
    CMN-PRE-PROD-TQ           None                     
 
 EMEA-UK-LON-THN2-MBL51#
+EMEA-UK-LON-THN2-MBL51#sh ip route summary 
+
+Operating routing protocol model: multi-agent
+Configured routing protocol model: multi-agent
+
+VRF: default
+   Route Source                                Number Of Routes
+------------------------------------- -------------------------
+   connected                                                  4
+   static (persistent)                                        0
+   static (non-persistent)                                    0
+   VXLAN Control Service                                      0
+   static nexthop-group                                       0
+   ospf                                                       0
+     Intra-area: 0 Inter-area: 0 External-1: 0 External-2: 0   
+     NSSA External-1: 0 NSSA External-2: 0                     
+   ospfv3                                                     0
+   bgp                                                       58
+     External: 58 Internal: 0                                  
+   isis                                                       0
+     Level-1: 0 Level-2: 0                                     
+   rip                                                        0
+   internal                                                   8
+   attached                                                   3
+   aggregate                                                  0
+   dynamic policy                                             0
+   gribi                                                      0
+                                                               
+   Total Routes                                              73
+
+Number of routes per mask-length:
+   /8: 2         /31: 37       /32: 34       
+
+EMEA-UK-LON-THN2-MBL51#
+
+EMEA-UK-LON-THN2-MBL51#             sh igmp snooping querier 
+Vlan  IP Address       Version  Port
+----------------------------------------
+1400  0.0.0.0          v2       McastSwitch
+1401  0.0.0.0          v2       McastSwitch
+1402  0.0.0.0          v2       McastSwitch
+1403  0.0.0.0          v2       McastSwitch
+1404  0.0.0.0          v2       McastSwitch
+1405  0.0.0.0          v2       McastSwitch
+1406  0.0.0.0          v2       McastSwitch
+1407  0.0.0.0          v2       McastSwitch
+1408  0.0.0.0          v2       McastSwitch
+1409  0.0.0.0          v2       McastSwitch
+1410  0.0.0.0          v2       McastSwitch
+1411  0.0.0.0          v2       McastSwitch
+1412  0.0.0.0          v2       McastSwitch
+1413  0.0.0.0          v2       McastSwitch
+4054  0.0.0.0          v2       McastSwitch
+4055  0.0.0.0          v2       McastSwitch
+4056  0.0.0.0          v2       McastSwitch
+4057  0.0.0.0          v2       McastSwitch
+4058  0.0.0.0          v2       McastSwitch
+4059  0.0.0.0          v2       McastSwitch
+4060  0.0.0.0          v2       McastSwitch
+4061  0.0.0.0          v2       McastSwitch
+4062  0.0.0.0          v2       McastSwitch
+4063  0.0.0.0          v2       McastSwitch
+4064  0.0.0.0          v2       McastSwitch
+4066  0.0.0.0          v2       McastSwitch
+4067  0.0.0.0          v2       McastSwitch
+4068  0.0.0.0          v2       McastSwitch
+4069  0.0.0.0          v2       McastSwitch
+4070  0.0.0.0          v2       McastSwitch
+4071  0.0.0.0          v2       McastSwitch
+4073  0.0.0.0          v2       McastSwitch
+4074  0.0.0.0          v2       McastSwitch
+4075  0.0.0.0          v2       McastSwitch
+4076  0.0.0.0          v2       McastSwitch
+4077  0.0.0.0          v2       McastSwitch
+4078  0.0.0.0          v2       McastSwitch
+4079  0.0.0.0          v2       McastSwitch
+4080  0.0.0.0          v2       McastSwitch
+4081  0.0.0.0          v2       McastSwitch
+4082  0.0.0.0          v2       McastSwitch
+4083  0.0.0.0          v2       McastSwitch
+4084  0.0.0.0          v2       McastSwitch
+4085  0.0.0.0          v2       McastSwitch
+4086  0.0.0.0          v2       McastSwitch
+4087  0.0.0.0          v2       McastSwitch
+4088  0.0.0.0          v2       McastSwitch
+4089  0.0.0.0          v2       McastSwitch
+4090  0.0.0.0          v2       McastSwitch
+4091  0.0.0.0          v2       McastSwitch
+4092  0.0.0.0          v2       McastSwitch
+4093  0.0.0.0          v2       McastSwitch
+4094  0.0.0.0          v2       McastSwitch
+EMEA-UK-LON-THN2-MBL51#             

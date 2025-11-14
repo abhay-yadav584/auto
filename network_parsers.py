@@ -257,4 +257,152 @@ Start
     def parse_vrf_reserved_ports_names(self, raw: str):
         return [r["VRF"] for r in self.parse_vrf_reserved_ports(raw)]
 
+    def parse_ip_route_summary(self, raw: str):
+        """
+        Parse 'sh ip route summary' output.
+
+        Returns list of items:
+        [{ "type": "entry", "name": <route source>, "count": <int> },
+         { "type": "detail", "raw": <detail line> }, ...]
+        Order preserved.
+        """
+        if not raw:
+            return []
+        lines = raw.splitlines()
+        start = None
+        block = []
+        # Locate command start
+        for i, line in enumerate(lines):
+            low = line.lower()
+            if "#sh ip route summary" in low or "#show ip route summary" in low:
+                start = i + 1
+                continue
+            if start is not None:
+                # Stop when next prompt (ends with '#') not the same command
+                low_line = line.lower()
+                if line.strip().endswith("#") and "ip route summary" not in low_line:
+                    break
+                block.append(line.rstrip())
+        if not block:
+            return []
+
+        # Find route source header
+        header_idx = None
+        for i, l in enumerate(block):
+            if "Route Source" in l:
+                header_idx = i
+                break
+        if header_idx is None:
+            return []
+
+        data = block[header_idx + 2:]  # skip header + separator
+
+        entry_re = re.compile(r'^\s*(?P<name>[A-Za-z][A-Za-z0-9() /\-]+?)\s+(?P<count>\d+)\s*$')
+        items = []
+        for l in data:
+            s = l.strip()
+            if not s:
+                continue
+            if s.lower().startswith("number of routes per mask-length"):
+                break
+            if set(s) <= {"-"}:
+                continue
+            if s.lower().startswith("total routes"):
+                m = re.search(r'(\d+)\s*$', s)
+                if m:
+                    items.append({"type": "entry", "name": "Total Routes", "count": int(m.group(1))})
+                continue
+            m = entry_re.match(l)
+            if m:
+                items.append({"type": "entry", "name": m.group("name").strip(), "count": int(m.group("count"))})
+            else:
+                items.append({"type": "detail", "raw": l})
+        return items
+
+    def parse_igmp_snooping_querier(self, raw: str):
+        """
+        Parse 'sh igmp snooping querier' output.
+        Returns dict: { 'lines': [all non-empty lines in block],
+                        'vlan_count': <int>,
+                        'vlan_lines': [lines matched as VLAN records] }
+        VLAN record heuristic: line starting with vlan id (digits) followed by whitespace.
+        """
+        if not raw:
+            return {"lines": [], "vlan_count": 0, "vlan_lines": []}
+        lines = raw.splitlines()
+        start = None
+        block = []
+        for i, line in enumerate(lines):
+            low = line.lower()
+            if "#sh igmp snooping querier" in low or "#show igmp snooping querier" in low or "sh igmp snooping querier" in low:
+                start = i + 1
+                continue
+            if start is not None:
+                # stop at next device prompt line ending with '#'
+                if line.strip().endswith("#") and "igmp snooping querier" not in low:
+                    break
+                if line.strip():
+                    block.append(line.rstrip())
+        if not block:
+            return {"lines": [], "vlan_count": 0, "vlan_lines": []}
+        vlan_pat = re.compile(r'^\s*\d+\s+')
+        vlan_lines = [l for l in block if vlan_pat.match(l)]
+        return {
+            "lines": block,
+            "vlan_count": len(vlan_lines),
+            "vlan_lines": vlan_lines
+        }
+
+    def parse_vlan_brief(self, raw: str):
+        """
+        Parse 'sh vlan brief' output.
+        Returns list of dicts: { 'VLAN': <str>, 'NAME': <str>, 'STATUS': <str>, 'PORTS': <str> }
+        """
+        if not raw:
+            return []
+        lines = raw.splitlines()
+        start = None
+        block = []
+        for i, line in enumerate(lines):
+            low = line.lower()
+            if "#sh vlan brief" in low or "#show vlan brief" in low:
+                start = i + 1
+                continue
+            if start is not None:
+                # Stop at next prompt or new command
+                if line.strip().endswith("#") and "vlan brief" not in low:
+                    break
+                block.append(line.rstrip())
+        if not block:
+            return []
+        # Find header
+        header_idx = None
+        for i, l in enumerate(block):
+            if re.search(r'\bVLAN\b', l) and re.search(r'\bName\b', l):
+                header_idx = i
+                break
+        if header_idx is None:
+            return []
+        data = block[header_idx + 2:]  # skip header + separator
+        vlans = []
+        vlan_line_re = re.compile(r'^\s*(\d+\*?)\s+(.+?)\s{2,}(\S+)\s+(.*)$')
+        for l in data:
+            if not l.strip():
+                continue
+            if l.strip().startswith('* indicates'):
+                break
+            if set(l.strip()) <= {'-'}:
+                continue
+            m = vlan_line_re.match(l)
+            if not m:
+                continue
+            vlan, name, status, ports = m.groups()
+            vlans.append({
+                "VLAN": vlan.rstrip('*'),
+                "NAME": name.strip(),
+                "STATUS": status.strip(),
+                "PORTS": ports.strip()
+            })
+        return vlans
+
 __all__ = ["NetworkParsers"]

@@ -3,6 +3,18 @@ from pathlib import Path
 import textfsm
 from io import StringIO
 from network_parsers import NetworkParsers
+import html  # added
+
+# Capture all printed output
+_LOG_LINES = []
+_original_print = print
+def _capture_print(*args, **kwargs):
+    _original_print(*args, **kwargs)
+    try:
+        _LOG_LINES.append(" ".join(str(a) for a in args))
+    except:
+        pass
+print = _capture_print
 
 PROMPT_LINE = re.compile(r'^.+#sh\s', re.IGNORECASE)
 IF_STATUS_LINE = re.compile(
@@ -359,6 +371,34 @@ def parse_vrf_reserved_ports(raw: str) -> list[str]:
             vrfs.append(parts[0].strip())
     return vrfs
 
+def print_route_source_table(rows):
+    if not rows:
+        print("Route Source Table: none")
+        return
+    # Normalize older structure (type/name/count/raw) to new SOURCE/COUNT form
+    if rows and 'SOURCE' not in rows[0]:
+        normalized = []
+        for r in rows:
+            if 'name' in r and r.get('type') == 'entry':
+                normalized.append({'SOURCE': r['name'], 'COUNT': r.get('count')})
+            elif 'raw' in r and r.get('type') == 'detail':
+                normalized.append({'SOURCE': r['raw'], 'COUNT': None})
+        if normalized:
+            rows = normalized
+    # Width based only on entries with numeric counts
+    entries = [r for r in rows if 'SOURCE' in r and r.get('COUNT') is not None]
+    width = max(60, max((len(r['SOURCE']) for r in entries), default=len("Source")))
+    print("\nRoute Source Table:")
+    for r in rows:
+        src = r.get('SOURCE', '')
+        cnt = r.get('COUNT')
+        if cnt is None:
+            # Detail / continuation line
+            print(src)
+        else:
+            print(f"{src.ljust(width)}{str(cnt).rjust(4)}")
+    print("-" * (width + 4))
+
 def main():
     try:
         raw = load_raw()
@@ -424,6 +464,22 @@ def main():
     for name in vrf_reserved:
         print(name)
 
+    # IP route summary
+    print("\nCommand: sh ip route summary")
+    route_rows = PARSER.parse_ip_route_summary(raw)
+    print_route_source_table(route_rows)
+
 if __name__ == "__main__":
     main()
+    # Write captured output to text file
+    Path("script_output.txt").write_text("\n".join(_LOG_LINES), encoding="utf-8")
+    # Write captured output to HTML file
+    Path("script_output.html").write_text(
+        "<html><head><meta charset='utf-8'><title>Script Output</title>"
+        "<style>body{font-family:monospace;white-space:pre-wrap;margin:16px;}</style></head><body><pre>"
+        + html.escape("\n".join(_LOG_LINES)) +
+        "</pre></body></html>",
+        encoding="utf-8"
+    )
+    _original_print("Output files generated: script_output.txt, script_output.html")
 
