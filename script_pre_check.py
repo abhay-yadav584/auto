@@ -244,7 +244,7 @@ def _print_bgp_evpn_route_type_ethernet_segment_from_sample():
     print(f"{'TOTAL DISTINCT'.ljust(rd_w)}  {str(len(counts)).rjust(c_w)}")
     print(f"{'TOTAL OCCURRENCES'.ljust(rd_w)}  {str(total).rjust(c_w)}")
 
-def _write_output_file(content: str, filename: str = "script_output.txt"):
+def _write_output_file(content: str, filename: str):
     """Write captured script output to a file in the same directory."""
     out_path = os.path.join(os.path.dirname(__file__), filename)
     try:
@@ -253,7 +253,47 @@ def _write_output_file(content: str, filename: str = "script_output.txt"):
     except Exception as e:
         print(f"Failed writing {filename}: {e}")
 
+def _run_parsing(raw: str):
+    isc = InterfacesStatusCount()  # reuse object for methods; override content
+    isc.content = raw or ""
+    buf = io.StringIO()
+    # Start capture
+    up, down = isc.count_ip_interfaces()
+    conn, dis = isc.count_interfaces()
+    isc.display_results()
+    bgp = BgpStatus(isc.content)
+    bgp.print_bgp_status()
+    up, down = isc.count_ip_interfaces()
+    conn, dis = isc.count_interfaces()
+    est = bgp.count_established_sessions()
+    print("\n--- Summary ---")
+    print(f"UP: {up} DOWN: {down} CONNECTED: {conn} DISABLED: {dis} ESTABLISHED BGP: {est}")
+    # Class-based tables
+    rs = RouteSummary(isc.content); rs.print()
+    ig = IgmpSnoopingQuerier(isc.content); ig.print()
+    vb = VlanBrief(isc.content); vb.print()
+    vd = VlanDynamic(isc.content); vd.print()
+    ev = EvpnRouteTypes(isc.content); ev.print_summary()
+    # EVPN detailed
+    _print_bgp_evpn_route_type_auto_discovery_from_sample()
+    _print_bgp_evpn_route_type_mac_ip_from_sample()
+    _print_bgp_evpn_route_type_imet_from_sample()
+    _print_bgp_evpn_route_type_ethernet_segment_from_sample()
+    # Non-class helpers
+    _print_route_summary_table(isc.content)
+    _print_igmp_snooping_querier(isc.content)
+    _print_vlan_brief(isc.content)
+    _print_vlan_dynamic(isc.content)
+    return buf.getvalue()
+
 def main():
+    # Run for test.txt (existing behavior)
+    test_path = os.path.join(os.path.dirname(__file__), "test.txt")
+    test_raw = ""
+    if os.path.isfile(test_path):
+        test_raw = open(test_path, "r", encoding="utf-8", errors="ignore").read()
+    else:
+        print("test.txt not found.")
     _buf = io.StringIO()
     _real_stdout = sys.stdout
     sys.stdout = _buf
@@ -267,7 +307,6 @@ def main():
         est = bgp.count_established_sessions()
         print("\n--- Summary ---")
         print(f"UP: {up} DOWN: {down} CONNECTED: {conn} DISABLED: {dis} ESTABLISHED BGP: {est}")
-        # Optional class-based usage (non-breaking)
         rs = RouteSummary(isc.content); rs.print()
         ig = IgmpSnoopingQuerier(isc.content); ig.print()
         vb = VlanBrief(isc.content); vb.print()
@@ -279,9 +318,317 @@ def main():
         _print_bgp_evpn_route_type_ethernet_segment_from_sample()
     finally:
         sys.stdout = _real_stdout
-    _out = _buf.getvalue()
-    print(_out)  # echo to console once
-    _write_output_file(_out, "script_output.txt")
+    test_out = _buf.getvalue()
+    print(test_out)
+    _write_output_file(test_out, "script_output.txt")
+
+    # Run for post_check.txt (new)
+    post_path = os.path.join(os.path.dirname(__file__), "post_check.txt")
+    if os.path.isfile(post_path):
+        post_raw = open(post_path, "r", encoding="utf-8", errors="ignore").read()
+        # Reuse same functions but need EVPN sample readers to point at post file temporarily
+        # Simplest: temporarily rename expected file references
+        _buf2 = io.StringIO()
+        sys.stdout = _buf2
+        try:
+            # Override sample-based functions to read post_check.txt by monkey patching path lookups
+            def _load_and_replace(func, new_file):
+                # Wrap original function to force reading new_file
+                def wrapper():
+                    # Replace internal sample_path usage by reading new_file directly
+                    raw_local = post_raw
+                    parser = NetworkParsers()
+                    if func.__name__.endswith("auto_discovery_from_sample"):
+                        rows = parser.parse_bgp_evpn_route_type_auto_discovery(raw_local)
+                        print("\nCommand executed (from post_check.txt):\nsh bgp evpn route-type auto-discovery")
+                        if not rows:
+                            print("No auto-discovery route-type data found."); return
+                        print("Entries (all occurrences):")
+                        for r in rows: print(f"  RD {r.get('RD')}")
+                        counts={}
+                        for r in rows:
+                            rd=r.get("RD")
+                            if rd: counts[rd]=counts.get(rd,0)+1
+                        rd_w=max(len("RD"),*(len(x) for x in counts))
+                        c_w=len("Count")
+                        header=f"{'RD'.ljust(rd_w)}  {'Count'.rjust(c_w)}"
+                        print("\nSummary:"); print(header); print("-"*len(header))
+                        total=0
+                        for rd in sorted(counts):
+                            v=counts[rd]; total+=v
+                            print(f"{rd.ljust(rd_w)}  {str(v).rjust(c_w)}")
+                        print("-"*len(header))
+                        print(f"{'TOTAL DISTINCT'.ljust(rd_w)}  {str(len(counts)).rjust(c_w)}")
+                        print(f"{'TOTAL OCCURRENCES'.ljust(rd_w)}  {str(total).rjust(c_w)}")
+                    elif func.__name__.endswith("mac_ip_from_sample"):
+                        rows = parser.parse_bgp_evpn_route_type_mac_ip(raw_local)
+                        print("\nCommand executed (from post_check.txt):\nsh bgp evpn route-type mac-ip")
+                        if not rows:
+                            print("No mac-ip route-type data found."); return
+                        print("Entries (all occurrences):")
+                        for r in rows: print(f"  RD {r.get('RD')}  MAC {r.get('MAC')}  IP {r.get('IP') or ''}")
+                        counts={}
+                        for r in rows:
+                            rd=r.get("RD")
+                            if rd: counts[rd]=counts.get(rd,0)+1
+                        rd_w=max(len("RD"),*(len(x) for x in counts))
+                        c_w=len("Count"); header=f"{'RD'.ljust(rd_w)}  {'Count'.rjust(c_w)}"
+                        print("\nSummary:"); print(header); print("-"*len(header))
+                        total=0
+                        for rd in sorted(counts):
+                            v=counts[rd]; total+=v
+                            print(f"{rd.ljust(rd_w)}  {str(v).rjust(c_w)}")
+                        print("-"*len(header))
+                        print(f"{'TOTAL DISTINCT'.ljust(rd_w)}  {str(len(counts)).rjust(c_w)}")
+                        print(f"{'TOTAL OCCURRENCES'.ljust(rd_w)}  {str(total).rjust(c_w)}")
+                    elif func.__name__.endswith("imet_from_sample"):
+                        rows = parser.parse_bgp_evpn_route_type_imet(raw_local)
+                        print("\nCommand executed (from post_check.txt):\nsh bgp evpn route-type imet")
+                        if not rows:
+                            print("No imet route-type data found."); return
+                        print("Entries (all occurrences):")
+                        for r in rows: print(f"  RD {r.get('RD')}  IP {r.get('IP') or ''}")
+                        counts={}
+                        for r in rows:
+                            rd=r.get("RD")
+                            if rd: counts[rd]=counts.get(rd,0)+1
+                        rd_w=max(len("RD"),*(len(x) for x in counts))
+                        c_w=len("Count"); header=f"{'RD'.ljust(rd_w)}  {'Count'.rjust(c_w)}"
+                        print("\nSummary:"); print(header); print("-"*len(header))
+                        total=0
+                        for rd in sorted(counts):
+                            v=counts[rd]; total+=v
+                            print(f"{rd.ljust(rd_w)}  {str(v).rjust(c_w)}")
+                        print("-"*len(header))
+                        print(f"{'TOTAL DISTINCT'.ljust(rd_w)}  {str(len(counts)).rjust(c_w)}")
+                        print(f"{'TOTAL OCCURRENCES'.ljust(rd_w)}  {str(total).rjust(c_w)}")
+                    elif func.__name__.endswith("ethernet_segment_from_sample"):
+                        rows = parser.parse_bgp_evpn_route_type_ethernet_segment(raw_local)
+                        print("\nCommand executed (from post_check.txt):\nsh bgp evpn route-type ethernet-segment")
+                        if not rows:
+                            print("No ethernet-segment route-type data found."); return
+                        print("Entries (all occurrences):")
+                        for r in rows: print(f"  RD {r.get('RD')}  ESI {r.get('ESI')}")
+                        counts={}
+                        for r in rows:
+                            rd=r.get("RD")
+                            if rd: counts[rd]=counts.get(rd,0)+1
+                        rd_w=max(len("RD"),*(len(x) for x in counts))
+                        c_w=len("Count"); header=f"{'RD'.ljust(rd_w)}  {'Count'.rjust(c_w)}"
+                        print("\nSummary:"); print(header); print("-"*len(header))
+                        total=0
+                        for rd in sorted(counts):
+                            v=counts[rd]; total+=v
+                            print(f"{rd.ljust(rd_w)}  {str(v).rjust(c_w)}")
+                        print("-"*len(header))
+                        print(f"{'TOTAL DISTINCT'.ljust(rd_w)}  {str(len(counts)).rjust(c_w)}")
+                        print(f"{'TOTAL OCCURRENCES'.ljust(rd_w)}  {str(total).rjust(c_w)}")
+                return wrapper
+
+            # Run same high-level summary for post_check
+            isc_post = InterfacesStatusCount()
+            isc_post.content = post_raw
+            isc_post.display_results()
+            bgp_post = BgpStatus(isc_post.content)
+            bgp_post.print_bgp_status()
+            up_p, down_p = isc_post.count_ip_interfaces()
+            conn_p, dis_p = isc_post.count_interfaces()
+            est_p = bgp_post.count_established_sessions()
+            print("\n--- Summary (post_check) ---")
+            print(f"UP: {up_p} DOWN: {down_p} CONNECTED: {conn_p} DISABLED: {dis_p} ESTABLISHED BGP: {est_p}")
+            RouteSummary(isc_post.content).print()
+            IgmpSnoopingQuerier(isc_post.content).print()
+            VlanBrief(isc_post.content).print()
+            VlanDynamic(isc_post.content).print()
+            EvpnRouteTypes(isc_post.content).print_summary()
+            # EVPN detailed for post_check
+            for func in (
+                _print_bgp_evpn_route_type_auto_discovery_from_sample,
+                _print_bgp_evpn_route_type_mac_ip_from_sample,
+                _print_bgp_evpn_route_type_imet_from_sample,
+                _print_bgp_evpn_route_type_ethernet_segment_from_sample,
+            ):
+                wrapped = _load_and_replace(func, post_path)
+                wrapped()
+        finally:
+            sys.stdout = _real_stdout
+        post_out = _buf2.getvalue()
+        print(post_out)
+        _write_output_file(post_out, "post_check_output.txt")
+    else:
+        print("post_check.txt not found; skipping second pass.")
+
+# ---- Test class addition ----
+class OutputTests:
+    def __init__(self, base_dir: str):
+        self.base_dir = base_dir
+        self.script_content = self._read("script_output.txt")
+        self.post_content = self._read("post_check_output.txt")
+        self.results = []
+
+    def _read(self, fname):
+        path = os.path.join(self.base_dir, fname)
+        if not os.path.isfile(path):
+            return ""
+        try:
+            return open(path, "r", encoding="utf-8", errors="ignore").read()
+        except Exception:
+            return ""
+
+    def _extract_int(self, text, label):
+        m = re.search(rf"{re.escape(label)}\s*:\s*(\d+)", text)
+        return int(m.group(1)) if m else None
+
+    def _connected(self, content):
+        return self._extract_int(content, "Number of interfaces CONNECTED")
+
+    def _disabled(self, content):
+        return self._extract_int(content, "Number of interfaces DISABLED")
+
+    def _up(self, content):
+        return self._extract_int(content, "Number of interfaces UP")
+
+    def _down(self, content):
+        return self._extract_int(content, "Number of interfaces DOWN")
+
+    def _established_bgp(self, content):
+        m = re.search(r"ESTABLISHED BGP:\s*(\d+)", content)
+        return int(m.group(1)) if m else None
+
+    def _evpn_summary_counts(self, content):
+        # From "EVPN Route-Type Summary (class):"
+        counts = {}
+        for key in ["auto-discovery", "mac-ip", "imet", "ethernet-segment"]:
+            m = re.search(rf"{key}:\s*(\d+)\s+entries", content)
+            if m:
+                counts[key] = int(m.group(1))
+        return counts
+
+    def _assert_equal(self, name, a, b):
+        if a is None or b is None:
+            status = "SKIP"
+            detail = f"{name}: missing data (script={a}, post={b})"
+        else:
+            status = "PASS" if a == b else "FAIL"
+            detail = f"{name}: script={a} post={b}"
+        self.results.append((name, status, detail))
+
+    def _record(self, label, a, b):
+        if a is None or b is None:
+            status = "SKIP"
+            self.results.append((label, a, b, status))
+        else:
+            status = "PASS" if a == b else "FAIL"
+            self.results.append((label, a, b, status))
+
+    # Test 1: CONNECTED interfaces equal
+    def test_connected_interfaces_equal(self):
+        self._record("connected_interfaces",
+                     self._connected(self.script_content),
+                     self._connected(self.post_content))
+
+    # Example additional tests (can expand as needed)
+    def test_disabled_interfaces_equal(self):
+        self._record("disabled_interfaces",
+                     self._disabled(self.script_content),
+                     self._disabled(self.post_content))
+
+    def test_up_interfaces_equal(self):
+        self._record("up_interfaces",
+                     self._up(self.script_content),
+                     self._up(self.post_content))
+
+    def test_down_interfaces_equal(self):
+        self._record("down_interfaces",
+                     self._down(self.script_content),
+                     self._down(self.post_content))
+
+    def test_established_bgp_equal(self):
+        self._record("established_bgp",
+                     self._established_bgp(self.script_content),
+                     self._established_bgp(self.post_content))
+
+    def test_evpn_mac_ip_non_decrease(self):
+        sc = self._evpn_summary_counts(self.script_content).get("mac-ip")
+        pc = self._evpn_summary_counts(self.post_content).get("mac-ip")
+        if sc is None or pc is None:
+            self.results.append(("evpn_mac_ip_non_decrease", sc, pc, "SKIP"))
+        else:
+            status = "PASS" if pc >= sc else "FAIL"
+            self.results.append(("evpn_mac_ip_non_decrease", sc, pc, status))
+
+    def write_html(self, filename="test_results.html"):
+        if not self.results:
+            return
+        path = os.path.join(self.base_dir, filename)
+        rows = []
+        for label, pre_val, post_val, status in self.results:
+            pre_s = "-" if pre_val is None else str(pre_val)
+            post_s = "-" if post_val is None else str(post_val)
+            match_word = "match" if status == "PASS" else "mismatch" if status == "FAIL" else "skip"
+            cls = "pass" if status == "PASS" else "fail" if status == "FAIL" else "skip"
+            rows.append(
+                f"<tr><td>{label}</td><td>{pre_s}</td><td>{post_s}</td>"
+                f"<td>{match_word}</td><td><span class='{cls}'>{status}</span></td></tr>"
+            )
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Pre/Post Check Test Results</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin:20px; }}
+table {{ border-collapse: collapse; width: 100%; max-width: 1100px; }}
+th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 13px; }}
+th {{ background: #f5f5f5; }}
+tr:nth-child(even) {{ background: #fafafa; }}
+.pass {{ color: #0a0; font-weight: 600; }}
+.fail, .skip {{ color: #c00; font-weight: 600; }}
+</style>
+</head>
+<body>
+<h2>Pre / Post Check Test Results</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th><th>pre_check</th><th>post_check</th><th>match</th><th>status</th>
+</tr>
+</thead>
+<tbody>
+{''.join(rows)}
+</tbody>
+</table>
+<p>Generated from script_output.txt and post_check_output.txt.</p>
+</body>
+</html>"""
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"\nHTML report written: file://{path}")
+        except Exception as e:
+            print(f"Failed writing HTML report: {e}")
+
+    def run_all(self):
+        if not self.script_content or not self.post_content:
+            print("\n[Tests] SKIP: One or both output files missing.")
+            return
+        self.test_connected_interfaces_equal()
+        self.test_disabled_interfaces_equal()
+        self.test_up_interfaces_equal()
+        self.test_down_interfaces_equal()
+        self.test_established_bgp_equal()
+        self.test_evpn_mac_ip_non_decrease()
+        print("\n=== Test Results (tabular) ===")
+        for label, pre_val, post_val, status in self.results:
+            pre_s = "-" if pre_val is None else str(pre_val)
+            post_s = "-" if post_val is None else str(post_val)
+            match_word = "match" if status == "PASS" else "mismatch" if status == "FAIL" else "skip"
+            print(f"{label.ljust(28)} pre_check={pre_s}  post_check={post_s}  {match_word} {status.lower()}")
+        # Write HTML after console output
+        self.write_html()
 
 if __name__ == "__main__":
     main()
+    # Run tests after main if both outputs exist
+    tester = OutputTests(os.path.dirname(__file__))
+    tester.run_all()
