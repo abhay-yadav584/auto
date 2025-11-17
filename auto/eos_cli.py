@@ -10,6 +10,8 @@ __all__ = [
     "VlanDynamic",
     "EvpnRouteTypes",
     "VXLAN",
+    "MacAddressTableDynamic",
+    "VrfReservedPorts"  # NEW
 ]
 
 def _fallback_parse_bgp_summary(text: str):
@@ -301,7 +303,47 @@ class BgpStatus:
 class RouteSummary:
     def __init__(self, content: str):
         self.content = content or ""
+    def _raw_lines(self):
+        if not self.content:
+            return []
+        # Locate start of "sh ip route summary" command block
+        lines = self.content.splitlines()
+        start = None
+        for i, l in enumerate(lines):
+            low = l.lower()
+            if "#sh ip route summary" in low or "show ip route summary" in low:
+                start = i + 1
+                break
+        if start is None:
+            return []
+        block = []
+        for l in lines[start:]:
+            # Stop at next prompt or another command
+            if l.strip().endswith("#") and "#sh" in l:
+                break
+            block.append(l.rstrip("\n"))
+        # Extract only source/count lines plus Total Routes
+        out = []
+        for l in block:
+            if re.match(r'\s*(connected|static|VXLAN Control Service|ospf|ospfv3|bgp|isis|rip|internal|attached|aggregate|dynamic policy|gribi)\b', l) \
+               or re.search(r'\bTotal Routes\b', l) \
+               or re.match(r'\s*Intra-area:', l) \
+               or re.match(r'\s*NSSA External-1:', l) \
+               or re.match(r'\s*External:', l) \
+               or re.match(r'\s*Level-1:', l):
+                out.append(l)
+        return out
+
     def print(self):
+        raw = self._raw_lines()
+        if raw:
+            # NEW: command executed line
+            print("\ncommand executed: sh ip route summary")
+            print("\nIP Route Summary (raw):")
+            for l in raw:
+                print(l.lstrip())  # match expected (first line unindented)
+            return
+        # Fallback to existing parsed summary
         parser = _get_parser()
         rows = parser.parse_ip_route_summary(self.content) if parser else []
         print("\nRoute Summary (class):")
@@ -389,10 +431,70 @@ class VXLAN:
                 self.vteps = []
 
     def print_vtep_detail(self):
+        print("while parsing command: show vxlan vtep detail")
+        print(f"number of VTEP record = {len(self.vteps)}")
         print("\nCommand executed:\nshow vxlan vtep detail")
+        print(f"VTEP count: {len(self.vteps)}")
         if not self.vteps:
             print("No VTEP detail data found.")
             return
-        print(f"VTEP count: {len(self.vteps)}")
         for r in self.vteps:
             print(f"  {r['VTEP']}  LearnedVia={r['LEARNED_VIA']}  MACLearning={r['MAC_LEARNING']}  TunnelTypes={r['TUNNEL_TYPES']}")
+
+class MacAddressTableDynamic:
+    """Wrapper / printer for 'show mac address-table dynamic'."""
+    def __init__(self, content: str):
+        self.content = content or ""
+        parser = _get_parser()
+        parse_fn = getattr(parser, "parse_mac_address_table_dynamic", None) if parser else None
+        self.data = parse_fn(self.content) if parse_fn else {"entries": [], "total": None, "per_vlan": {}}
+
+    def print(self):
+        print("\nCommand executed:\nshow mac address-table dynamic")
+        entries = self.data.get("entries", [])
+        total = self.data.get("total")
+        if not entries:
+            print("No dynamic MAC address entries found.")
+            return
+        print(f"Total Dynamic MACs: {total if total is not None else len(entries)}")
+        # Per-VLAN summary
+        per_vlan = self.data.get("per_vlan", {})
+        vlan_w = max(len("VLAN"), *(len(v) for v in per_vlan)) if per_vlan else 4
+        cnt_w = len("Count")
+        header = f"{'VLAN'.ljust(vlan_w)}  {'Count'.rjust(cnt_w)}"
+        print("\nPer-VLAN MAC counts:")
+        print(header)
+        print("-" * len(header))
+        for vlan in sorted(per_vlan, key=lambda x: int(x)):
+            print(f"{vlan.ljust(vlan_w)}  {str(per_vlan[vlan]).rjust(cnt_w)}")
+        print("-" * len(header))
+
+class VrfReservedPorts:
+    """Wrapper / printer for 'show vrf reserved-ports'."""
+    def __init__(self, content: str):
+        self.content = content or ""
+        parser = _get_parser()
+        parse_fn = getattr(parser, "parse_vrf_reserved_ports", None) if parser else None
+        self.data = parse_fn(self.content) if parse_fn else {"entries": [], "total_ports": 0, "total_entries": 0}
+
+    def print(self):
+        print("\nCommand executed:\nshow vrf reserved-ports")
+        entries = self.data.get("entries", [])
+        if not entries:
+            print("No reserved ports data found.")
+            return
+        total_entries = self.data.get("total_entries", len(entries))
+        total_ports = self.data.get("total_ports", sum(e.get("COUNT", 0) for e in entries))
+        vrf_w = max(len("VRF"), *(len(e.get("VRF","")) for e in entries))
+        ports_w = max(len("Ports"), *(len(e.get("PORT_STR","")) for e in entries))
+        proto_w = max(len("Protocol"), *(len(e.get("PROTOCOL","")) for e in entries))
+        cnt_w = len("Count")
+        header = f"{'VRF'.ljust(vrf_w)}  {'Ports'.ljust(ports_w)}  {'Protocol'.ljust(proto_w)}  {'Count'.rjust(cnt_w)}"
+        print("Reserved Ports Table:")
+        print(header)
+        print("-" * len(header))
+        for e in entries:
+            print(f"{e.get('VRF','').ljust(vrf_w)}  {e.get('PORT_STR','').ljust(ports_w)}  {e.get('PROTOCOL','').ljust(proto_w)}  {str(e.get('COUNT',0)).rjust(cnt_w)}")
+        print("-" * len(header))
+        print(f"Total Entries: {total_entries}")
+        print(f"Total Reserved Ports: {total_ports}")

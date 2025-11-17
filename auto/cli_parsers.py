@@ -8,7 +8,8 @@ from .eos_cli import (
     VlanBrief,
     VlanDynamic,
     EvpnRouteTypes,
-    VXLAN
+    VXLAN,
+    MacAddressTableDynamic
 )
 # REMOVED: from cli_parsers import NetworkParsers  # circular / self-import
 
@@ -29,26 +30,34 @@ import sys
 # This script mainly orchestrates reading test.txt and printing formatted summaries.
 
 def _print_route_summary_table(raw: str):
-    parser = NetworkParsers()
-    rows = parser.parse_ip_route_summary(raw)
-    if not rows:
-        print("\nRoute Source Table: none")
+    # REPLACED with raw printer (no parsing)
+    lines = raw.splitlines()
+    start = None
+    for i, l in enumerate(lines):
+        low = l.lower()
+        if "#sh ip route summary" in low or "show ip route summary" in low:
+            start = i + 1
+            break
+    if start is None:
+        print("\nIP Route Summary (raw): none")
         return
-    counted_rows = [r for r in rows if r.get("COUNT") is not None]
-    if counted_rows:
-        name_width = max(len(r["SOURCE"]) for r in counted_rows)
-    else:
-        name_width = len("SOURCE")
-    target_width = max(name_width, 60)
-    print("\nRoute Source Table:")
-    for r in rows:
-        cnt = r.get("COUNT")
-        src = r.get("SOURCE", "")
-        if cnt is None:
-            print(src)
-        else:
-            print(f"{src.ljust(target_width)}{str(cnt).rjust(4)}")
-    print("")
+    block = []
+    for l in lines[start:]:
+        if l.strip().endswith("#") and "#sh" in l:
+            break
+        block.append(l.rstrip())
+    wanted = []
+    for l in block:
+        if re.match(r'\s*(connected|static|VXLAN Control Service|ospf|ospfv3|bgp|isis|rip|internal|attached|aggregate|dynamic policy|gribi)\b', l) \
+           or re.search(r'\bTotal Routes\b', l) \
+           or re.match(r'\s*Intra-area:', l) \
+           or re.match(r'\s*NSSA External-1:', l) \
+           or re.match(r'\s*External:', l) \
+           or re.match(r'\s*Level-1:', l):
+            wanted.append(l)
+    print("\nIP Route Summary (raw):")
+    for idx, l in enumerate(wanted):
+        print(l.lstrip() if idx == 0 else l)
 
 def _print_igmp_snooping_querier(raw: str):
     parser = NetworkParsers()
@@ -585,58 +594,226 @@ if not hasattr(NetworkParsers, "parse_bgp_evpn_summary"):
                 })
             return results
 
-def parse_show_vxlan_vtep_detail(output: str) -> dict:
-    """
-    Parse 'show vxlan vtep detail' output.
-    Returns list of dicts with keys:
-      VTEP, LEARNED_VIA, MAC_LEARNING, TUNNEL_TYPES
-    """
-    parser = NetworkParsers()
-    return parser.parse_vxlan_vtep_detail(output)
+# ---- Override: robust 'show vxlan vtep detail' parser (always replace) ----
+class NetworkParsers(NetworkParsers):
+    # ...existing code...
 
-# ---- Add parser for 'show vxlan vtep detail' if missing ----
-if not hasattr(NetworkParsers, "parse_vxlan_vtep_detail"):
+    def parse_vxlan_vtep_detail(self, text: str):
+        """
+        Parse 'show vxlan vtep detail' output.
+        Returns list of dicts:
+          { VTEP, LEARNED_VIA, MAC_LEARNING, TUNNEL_TYPES }
+        """
+        results = []
+        if not text:
+            return results
+        lines = text.splitlines()
+
+        # Locate header line
+        header_idx = None
+        for i, line in enumerate(lines):
+            if re.search(r'\bVTEP\s+Learned Via\s+MAC Address Learning', line):
+                header_idx = i
+                break
+        if header_idx is None:
+            return results
+
+        # Advance past header and any dashed separator lines
+        i = header_idx + 1
+        while i < len(lines) and re.match(r'\s*-{5,}', lines[i]):
+            i += 1
+
+        ip_re = re.compile(r'^\d{1,3}(?:\.\d{1,3}){3}$')
+
+        while i < len(lines):
+            raw = lines[i].rstrip()
+            if not raw:
+                break
+            low = raw.lower()
+            if low.startswith("total number of remote vteps"):
+                break
+            if raw.strip().endswith("#"):  # prompt / next command
+                break
+            # Split into columns by 2+ spaces
+            parts = re.split(r'\s{2,}', raw.strip())
+            if len(parts) < 4:
+                i += 1
+                continue
+            vtep, learned_via, mac_learning, tunnel_types = parts[0:4]
+            if not ip_re.match(vtep):
+                i += 1
+                continue
+            results.append({
+                "VTEP": vtep,
+                "LEARNED_VIA": learned_via.strip(),
+                "MAC_LEARNING": mac_learning.strip(),
+                "TUNNEL_TYPES": tunnel_types.strip()
+            })
+            i += 1
+        return results
+
+# ---- Add parser for 'show mac address-table dynamic' if missing ----
+if not hasattr(NetworkParsers, "parse_mac_address_table_dynamic"):
     class NetworkParsers(NetworkParsers):
         # ...existing code...
 
-        def parse_vxlan_vtep_detail(self, text: str):
+        def parse_mac_address_table_dynamic(self, text: str):
             """
-            Parse 'show vxlan vtep detail'.
-            Returns list of dicts:
-              { VTEP, LEARNED_VIA, MAC_LEARNING, TUNNEL_TYPES }
+            Parse 'show mac address-table dynamic' section.
+            Returns dict:
+              {
+                'entries': [ {VLAN, MAC, TYPE, PORTS, MOVES, LAST_MOVE}, ... ],
+                'total': <int|None>,
+                'per_vlan': { vlan: count, ... }
+              }
             """
-            results = []
             if not text:
-                return results
-            # Locate table start
+                return {"entries": [], "total": None, "per_vlan": {}}
             lines = text.splitlines()
-            header_idx = None
-            for i, line in enumerate(lines):
-                if re.match(r'\s*VTEP\s+Learned Via\s+MAC Address Learning', line):
-                    header_idx = i
+            # Find start marker line containing 'Mac Address Table' followed by header with 'Vlan'
+            start = None
+            for i, l in enumerate(lines):
+                if l.strip().startswith("Mac Address Table"):
+                    # scan ahead for header
+                    for j in range(i+1, min(i+10, len(lines))):
+                        if re.match(r'\s*Vlan\s+Mac Address\s+Type\s+Ports', lines[j]):
+                            start = j + 1
+                            break
+                if start:
                     break
-            if header_idx is None:
-                return results
-            # Skip dashed separator after header
-            i = header_idx + 1
-            while i < len(lines) and re.match(r'\s*-{5,}', lines[i]):
-                i += 1
-            row_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+(\S.+?)\s{2,}(\S.+?)\s{2,}(\S.+)$')
-            while i < len(lines):
-                line = lines[i].rstrip()
-                if not line or line.startswith("Total number of remote VTEPS"):
+            if start is None:
+                return {"entries": [], "total": None, "per_vlan": {}}
+            entries = []
+            total = None
+            data_re = re.compile(
+                r'^\s*(\d+)\s+([0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4})\s+(\S+)\s+(\S+)\s+(\d+)\s+(.+?)\s*$',
+                re.IGNORECASE
+            )
+            for k in range(start, len(lines)):
+                line = lines[k].rstrip()
+                if not line:
+                    continue
+                m_total = re.search(r'Total Mac Addresses for this criterion:\s*(\d+)', line)
+                if m_total:
+                    total = int(m_total.group(1))
                     break
-                m = row_re.match(line)
+                m = data_re.match(line)
                 if m:
-                    vtep = m.group(1)
-                    learned_via = m.group(2).strip()
-                    mac_learning = m.group(3).strip()
-                    tunnel_types = m.group(4).strip()
-                    results.append({
-                        "VTEP": vtep,
-                        "LEARNED_VIA": learned_via,
-                        "MAC_LEARNING": mac_learning,
-                        "TUNNEL_TYPES": tunnel_types
+                    vlan, mac, typ, ports, moves, last_move = m.groups()
+                    entries.append({
+                        "VLAN": vlan,
+                        "MAC": mac.lower(),
+                        "TYPE": typ,
+                        "PORTS": ports,
+                        "MOVES": int(moves),
+                        "LAST_MOVE": last_move
                     })
-                i += 1
-            return results
+            per_vlan = {}
+            for e in entries:
+                per_vlan[e["VLAN"]] = per_vlan.get(e["VLAN"], 0) + 1
+            return {"entries": entries, "total": total, "per_vlan": per_vlan}
+
+# ---- Force override: regex-based 'show vrf reserved-ports' parser (TextFSM-free) ----
+class NetworkParsers(NetworkParsers):
+    # ...existing code...
+
+    def parse_vrf_reserved_ports(self, text: str):
+        """
+        Parse 'show vrf reserved-ports' output.
+        Counts every VRF line even if Reserved ports is 'None'.
+        Returns:
+          {
+            'entries': [ {VRF, PORT_STR, PORT_START, PORT_END, PROTOCOL, COUNT}, ... ],
+            'total_ports': <int>,        # sum of COUNT (only numeric/range ports)
+            'total_entries': <int>       # number of VRF rows
+          }
+        """
+        if not text:
+            return {"entries": [], "total_ports": 0, "total_entries": 0}
+
+        lines = text.splitlines()
+        # Locate block start
+        start = None
+        for i, l in enumerate(lines):
+            low = l.lower()
+            if "show vrf reserved-ports" in low or "#show vrf reserved-ports" in low or "#sh vrf reserved-ports" in low:
+                start = i + 1
+                break
+        if start is None:
+            return {"entries": [], "total_ports": 0, "total_entries": 0}
+
+        # Collect until blank line or next prompt
+        block = []
+        for l in lines[start:]:
+            if l.strip().startswith("EMEA-") and "#sh" in l:
+                break
+            if l.strip().startswith("EMEA-") and l.strip().endswith("#"):
+                break
+            if l.strip() == "":
+                # allow trailing blank; stop
+                break
+            block.append(l.rstrip())
+
+        entries = []
+        # Skip header/separator lines
+        sep_re = re.compile(r'^-+')
+        header_detected = False
+        row_re = re.compile(r'^\s*(?P<vrf>\S[^\s]*)\s+(?P<ports>(None|none|\d+(?:-\d+)?))(?:\s+|$)', re.IGNORECASE)
+
+        for l in block:
+            ls = l.strip()
+            if not ls:
+                continue
+            if "VRF" in ls and "Reserved" in ls:
+                header_detected = True
+                continue
+            if sep_re.match(ls):
+                continue
+            m = row_re.match(l)
+            if not m:
+                # tolerate lines with extra spacing; attempt manual split
+                parts = [p for p in re.split(r'\s{2,}', ls) if p]
+                if len(parts) >= 2:
+                    vrf = parts[0]
+                    ports_field = parts[1]
+                else:
+                    continue
+            else:
+                vrf = m.group("vrf")
+                ports_field = m.group("ports")
+
+            ports_field_clean = ports_field.strip()
+            count = 0
+            p_start = p_end = None
+            proto = ""  # protocol not shown in this variant; leave blank
+            if ports_field_clean.lower() != "none":
+                # Single number or range
+                if "-" in ports_field_clean:
+                    a, b = ports_field_clean.split("-", 1)
+                    try:
+                        p_start = int(a); p_end = int(b)
+                        if p_end >= p_start:
+                            count = p_end - p_start + 1
+                    except ValueError:
+                        p_start = p_end = None
+                else:
+                    try:
+                        p_start = p_end = int(ports_field_clean)
+                        count = 1
+                    except ValueError:
+                        p_start = p_end = None
+            entries.append({
+                "VRF": vrf,
+                "PORT_STR": ports_field_clean,
+                "PORT_START": p_start,
+                "PORT_END": p_end,
+                "PROTOCOL": proto,
+                "COUNT": count
+            })
+
+        total_ports = sum(e["COUNT"] for e in entries)
+        return {
+            "entries": entries,
+            "total_ports": total_ports,
+            "total_entries": len(entries)
+        }
