@@ -1,15 +1,28 @@
 import os
 import re
-from eos_cli import (
+from .eos_cli import (
     InterfacesStatusCount,
     BgpStatus,
     RouteSummary,
     IgmpSnoopingQuerier,
     VlanBrief,
     VlanDynamic,
-    EvpnRouteTypes
+    EvpnRouteTypes,
+    VXLAN
 )
-from cli_parsers import NetworkParsers  # renamed from network_parsers
+# REMOVED: from cli_parsers import NetworkParsers  # circular / self-import
+
+# NEW: safe loader / stub for NetworkParsers to avoid NameError before patching
+try:
+    from .network_parsers import NetworkParsers  # if a dedicated module exists
+except ImportError:
+    try:
+        # If running outside package context, fallback absolute
+        from network_parsers import NetworkParsers
+    except Exception:
+        class NetworkParsers:
+            pass
+
 import io
 import sys
 # NOTE: Core parsing (all regex/block extraction) resides in network_parsers.py.
@@ -253,6 +266,41 @@ def _write_output_file(content: str, filename: str = "script_output.txt"):
     except Exception as e:
         print(f"Failed writing {filename}: {e}")
 
+def _print_bgp_evpn_summary(raw: str):
+    parser = NetworkParsers()
+    rows = parser.parse_bgp_evpn_neighbor_summary(raw)
+    print("\nCommand executed:\nsh bgp evpn summary")
+    if not rows:
+        print("No EVPN summary neighbor data found.")
+        return
+    estab = sum(1 for r in rows if r["STATE"].lower().startswith("estab"))
+    print(f"Neighbor count: {len(rows)}  Established: {estab}")
+
+def _strip_plain_bgp_summary(text: str) -> str:
+    """
+    Remove the plain 'Command executed:\\nshow bgp summary' block from output.
+    Keeps enhanced summary and other sections.
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    out = []
+    skip = False
+    for i, line in enumerate(lines):
+        if not skip and line.strip() == "Command executed:" and i + 1 < len(lines) and lines[i+1].strip() == "show bgp summary":
+            skip = True
+            continue
+        if skip:
+            # End block when we hit a blank line or next 'Command executed:' (other command) or 'sh bgp evpn summary'
+            if line.strip() == "" or line.startswith("Command executed:") or line.strip().startswith("sh bgp evpn summary"):
+                skip = False
+                # If this line is start of next section we keep it
+                if line.strip():
+                    out.append(line)
+            continue
+        out.append(line)
+    return "\n".join(out)
+
 def main():
     _buf = io.StringIO()
     _real_stdout = sys.stdout
@@ -265,23 +313,330 @@ def main():
         up, down = isc.count_ip_interfaces()
         conn, dis = isc.count_interfaces()
         est = bgp.count_established_sessions()
-        print("\n--- Summary ---")
-        print(f"UP: {up} DOWN: {down} CONNECTED: {conn} DISABLED: {dis} ESTABLISHED BGP: {est}")
-        # Optional class-based usage (non-breaking)
         rs = RouteSummary(isc.content); rs.print()
         ig = IgmpSnoopingQuerier(isc.content); ig.print()
         vb = VlanBrief(isc.content); vb.print()
         vd = VlanDynamic(isc.content); vd.print()
         ev = EvpnRouteTypes(isc.content); ev.print_summary()
+        _print_bgp_evpn_summary(isc.content)
+        VXLAN(isc.content).print_vtep_detail()
         _print_bgp_evpn_route_type_auto_discovery_from_sample()
-        _print_bgp_evpn_route_type_mac_ip_from_sample()
-        _print_bgp_evpn_route_type_imet_from_sample()
-        _print_bgp_evpn_route_type_ethernet_segment_from_sample()
     finally:
         sys.stdout = _real_stdout
     _out = _buf.getvalue()
-    print(_out)  # echo to console once
+    _out = _strip_plain_bgp_summary(_out)
+    print(_out)
     _write_output_file(_out, "script_output.txt")
 
 if __name__ == "__main__":
     main()
+
+# Add / patch parse_bgp_summary inside NetworkParsers
+try:
+    NetworkParsers
+except NameError:
+    class NetworkParsers:
+        # Placeholder; real file should already contain other parse_* methods.
+        pass
+
+if not hasattr(NetworkParsers, "parse_bgp_summary"):
+    class NetworkParsers(NetworkParsers):
+        # ...existing code...
+
+        def parse_bgp_summary(self, text: str):
+            """
+            Parse only the 'show bgp summary' neighbor table.
+            Neighbor lines are taken ONLY from the block that begins with the header
+            starting 'Neighbor' (containing NLRI columns) and the following dashed
+            separator line. Parsing stops at the first line that does not start with
+            an IPv4 address.
+            Returns list of dicts with NEIGHBOR, AS, STATE, NLRI_RCD, NLRI_ACC.
+            """
+            results = []
+            if not text:
+                return results
+
+            lines = text.splitlines()
+            ip_line_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+')
+            header_re = re.compile(r'^\s*Neighbor\s+.*NLRI\s+Rcd', re.IGNORECASE)
+
+            i = 0
+            while i < len(lines):
+                # Locate header line that marks start of the table
+                if header_re.match(lines[i]):
+                    i += 1
+                    # Skip dashed/separator lines
+                    while i < len(lines) and re.match(r'^\s*-{4,}', lines[i]):
+                        i += 1
+                    # Consume neighbor rows
+                    while i < len(lines):
+                        line = lines[i]
+                        if not ip_line_re.match(line):
+                            break  # end of neighbor block
+                        parts = re.split(r'\s+', line.strip())
+                        if len(parts) < 4:
+                            i += 1
+                            continue
+                        neighbor = parts[0]
+                        asn = parts[1]
+                        raw_state = parts[2]
+                        norm_state = re.sub(r'\d', '', raw_state)
+                        ls = norm_state.lower()
+                        if ls.startswith("estab"):
+                            state = "Established"
+                        elif ls.startswith("idle"):
+                            state = "Idle"
+                        elif ls.startswith("active"):
+                            state = "Active"
+                        else:
+                            state = norm_state
+                        # Last two integer tokens = NLRI Rcd / Acc (if present)
+                        ints = [p for p in parts if p.isdigit()]
+                        nlri_rcd = nlri_acc = None
+                        if len(ints) >= 2:
+                            nlri_rcd = int(ints[-2])
+                            nlri_acc = int(ints[-1])
+                        elif len(ints) == 1:
+                            nlri_rcd = nlri_acc = int(ints[-1])
+                        results.append({
+                            "NEIGHBOR": neighbor,
+                            "AS": asn,
+                            "STATE": state,
+                            "NLRI_RCD": nlri_rcd,
+                            "NLRI_ACC": nlri_acc
+                        })
+                        i += 1
+                    # Continue scanning (support multiple VRF blocks)
+                i += 1
+            return results
+
+def parse_show_bgp_summary(output: str) -> dict:
+    """
+    Wrapper: count unique neighbor IPs from the parsed BGP summary table.
+    """
+    parser = NetworkParsers()
+    rows = parser.parse_bgp_summary(output) or []
+    neighbors = sorted({r["NEIGHBOR"] for r in rows if r.get("NEIGHBOR")})
+    return {
+        "neighbor_count": len(neighbors),
+        "neighbors": neighbors
+    }
+
+# ---- REPLACE wrapper: show bgp evpn summary now parses neighbor table ----
+def parse_show_bgp_evpn_summary(output: str) -> dict:
+    """
+    Parse 'show bgp evpn summary' neighbor table (not route-type counts).
+    Returns dict:
+      {
+        'neighbor_count': <int>,
+        'established_count': <int>,
+        'neighbors': [ip,...],
+        'entries': [ {NEIGHBOR, VERSION, AS, MSG_RCV, MSG_SNT, INQ, OUTQ,
+                      UP_DOWN, STATE, PFX_RCD, PFX_ACC}, ... ],
+        'total_pfx_rcd': <int>,
+        'total_pfx_acc': <int>
+      }
+    """
+    parser = NetworkParsers()
+    rows = parser.parse_bgp_evpn_neighbor_summary(output) or []
+    neighbors = [r["NEIGHBOR"] for r in rows]
+    estab = sum(1 for r in rows if r["STATE"].lower().startswith("estab"))
+    total_rcd = sum(r["PFX_RCD"] for r in rows if r["PFX_RCD"] is not None)
+    total_acc = sum(r["PFX_ACC"] for r in rows if r["PFX_ACC"] is not None)
+    return {
+        "neighbor_count": len(neighbors),
+        "established_count": estab,
+        "neighbors": neighbors,
+        "entries": rows,
+        "total_pfx_rcd": total_rcd,
+        "total_pfx_acc": total_acc
+    }
+
+try:
+    PARSERS["show bgp evpn summary"] = parse_show_bgp_evpn_summary
+except NameError:
+    pass
+
+# ---- Add neighbor-style EVPN summary parser if missing ----
+if not hasattr(NetworkParsers, "parse_bgp_evpn_neighbor_summary"):
+    class NetworkParsers(NetworkParsers):
+        # ...existing code...
+
+        def parse_bgp_evpn_neighbor_summary(self, text: str):
+            """
+            Parse neighbor lines from 'show bgp evpn summary'.
+            Expected header then lines like:
+              10.4.228.1 4 64100.21001  10817487  12924096    0    0  191d18h Estab   3839   3839
+            Returns list of dicts with keys:
+              NEIGHBOR, VERSION, AS, MSG_RCV, MSG_SNT, INQ, OUTQ, UP_DOWN, STATE, PFX_RCD, PFX_ACC
+            """
+            results = []
+            if not text:
+                return results
+            ip_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+')
+            # Strip leading spaces, collapse multiple spaces
+            for line in text.splitlines():
+                if not ip_re.match(line):
+                    continue
+                # Skip if this is part of a different context (sanity: must contain MsgRcvd-style numeric columns)
+                parts = re.split(r'\s+', line.strip())
+                if len(parts) < 11:
+                    continue
+                try:
+                    neighbor = parts[0]
+                    version = parts[1]
+                    asn = parts[2]
+                    msg_rcv = int(parts[3])
+                    msg_snt = int(parts[4])
+                    inq = int(parts[5])
+                    outq = int(parts[6])
+                    up_down = parts[7]
+                    state = parts[8]
+                    # Remaining two columns could be pref received/accepted
+                    # Sometimes state might be split (e.g. Estab vs Established); we handle simple forms.
+                    # If state token is not alpha (rare), skip line.
+                    if not re.match(r'[A-Za-z]', state):
+                        continue
+                    pfx_rcd = None
+                    pfx_acc = None
+                    # Last two numeric tokens
+                    tail_nums = [p for p in parts[9:] if p.isdigit()]
+                    if len(tail_nums) >= 2:
+                        pfx_rcd = int(tail_nums[-2])
+                        pfx_acc = int(tail_nums[-1])
+                    elif len(tail_nums) == 1:
+                        pfx_rcd = pfx_acc = int(tail_nums[-1])
+                    results.append({
+                        "NEIGHBOR": neighbor,
+                        "VERSION": version,
+                        "AS": asn,
+                        "MSG_RCV": msg_rcv,
+                        "MSG_SNT": msg_snt,
+                        "INQ": inq,
+                        "OUTQ": outq,
+                        "UP_DOWN": up_down,
+                        "STATE": state,
+                        "PFX_RCD": pfx_rcd,
+                        "PFX_ACC": pfx_acc
+                    })
+                except Exception:
+                    # Ignore malformed line
+                    continue
+            return results
+
+# Patch NetworkParsers with parse_bgp_evpn_summary if missing.
+if not hasattr(NetworkParsers, "parse_bgp_evpn_summary"):
+    class NetworkParsers(NetworkParsers):
+        # ...existing code...
+
+        def parse_bgp_evpn_summary(self, text: str):
+            """
+            Parse 'show bgp evpn summary' route-type table.
+            Expected lines (examples):
+              1 - Ethernet Auto-Discovery          10          10
+              2 - MAC/IP Advertisement            500         500
+              3 - Inclusive Multicast Ethernet Tag  4           4
+              4 - Ethernet Segment                  2           2
+              5 - IP Prefix                        20          20
+              Total                               536         536
+            Returns list of dicts:
+              {
+                'ROUTE_TYPE_NUM': <int|None>,  # None for Total line
+                'ROUTE_TYPE_NAME': <str>,
+                'PATHS': <int|None>,
+                'ADVERTISED': <int|None>
+              }
+            """
+            results = []
+            if not text:
+                return results
+            # Accept hyphen or ' - ' after number; capture name until two numeric columns.
+            line_re = re.compile(
+                r'^\s*(?:(?P<num>[1-5])\s*-\s*)?(?P<name>[A-Za-z ].*?)\s+(?P<paths>\d+)\s+(?P<adv>\d+)\s*$'
+            )
+            total_re = re.compile(r'^\s*Total\s+(?P<paths>\d+)\s+(?P<adv>\d+)\s*$')
+            for line in text.splitlines():
+                if not line.strip():
+                    continue
+                m_total = total_re.match(line)
+                if m_total:
+                    results.append({
+                        "ROUTE_TYPE_NUM": None,
+                        "ROUTE_TYPE_NAME": "Total",
+                        "PATHS": int(m_total.group("paths")),
+                        "ADVERTISED": int(m_total.group("adv"))
+                    })
+                    continue
+                m = line_re.match(line)
+                if not m:
+                    continue
+                num = m.group("num")
+                name = m.group("name").strip()
+                paths = m.group("paths")
+                adv = m.group("adv")
+                # Filter out header/separator lines
+                if name.lower().startswith("route type") or set(name) == set("-"):
+                    continue
+                results.append({
+                    "ROUTE_TYPE_NUM": int(num) if num is not None else None,
+                    "ROUTE_TYPE_NAME": name,
+                    "PATHS": int(paths) if paths is not None else None,
+                    "ADVERTISED": int(adv) if adv is not None else None
+                })
+            return results
+
+def parse_show_vxlan_vtep_detail(output: str) -> dict:
+    """
+    Parse 'show vxlan vtep detail' output.
+    Returns list of dicts with keys:
+      VTEP, LEARNED_VIA, MAC_LEARNING, TUNNEL_TYPES
+    """
+    parser = NetworkParsers()
+    return parser.parse_vxlan_vtep_detail(output)
+
+# ---- Add parser for 'show vxlan vtep detail' if missing ----
+if not hasattr(NetworkParsers, "parse_vxlan_vtep_detail"):
+    class NetworkParsers(NetworkParsers):
+        # ...existing code...
+
+        def parse_vxlan_vtep_detail(self, text: str):
+            """
+            Parse 'show vxlan vtep detail'.
+            Returns list of dicts:
+              { VTEP, LEARNED_VIA, MAC_LEARNING, TUNNEL_TYPES }
+            """
+            results = []
+            if not text:
+                return results
+            # Locate table start
+            lines = text.splitlines()
+            header_idx = None
+            for i, line in enumerate(lines):
+                if re.match(r'\s*VTEP\s+Learned Via\s+MAC Address Learning', line):
+                    header_idx = i
+                    break
+            if header_idx is None:
+                return results
+            # Skip dashed separator after header
+            i = header_idx + 1
+            while i < len(lines) and re.match(r'\s*-{5,}', lines[i]):
+                i += 1
+            row_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+(\S.+?)\s{2,}(\S.+?)\s{2,}(\S.+)$')
+            while i < len(lines):
+                line = lines[i].rstrip()
+                if not line or line.startswith("Total number of remote VTEPS"):
+                    break
+                m = row_re.match(line)
+                if m:
+                    vtep = m.group(1)
+                    learned_via = m.group(2).strip()
+                    mac_learning = m.group(3).strip()
+                    tunnel_types = m.group(4).strip()
+                    results.append({
+                        "VTEP": vtep,
+                        "LEARNED_VIA": learned_via,
+                        "MAC_LEARNING": mac_learning,
+                        "TUNNEL_TYPES": tunnel_types
+                    })
+                i += 1
+            return results

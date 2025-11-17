@@ -1,11 +1,107 @@
 import os
 import re
-from .cli_parsers import NetworkParsers  # fixed: removed self-import that caused circular import
 
+__all__ = [
+    "InterfacesStatusCount",
+    "BgpStatus",
+    "RouteSummary",
+    "IgmpSnoopingQuerier",
+    "VlanBrief",
+    "VlanDynamic",
+    "EvpnRouteTypes",
+    "VXLAN",
+]
+
+def _fallback_parse_bgp_summary(text: str):
+    """
+    Fallback parser for 'show bgp summary' when TextFSM templates are unavailable.
+    Extracts neighbor lines beginning with an IPv4 address until a non-IP line.
+    Returns list of dicts: NEIGHBOR, AS, STATE, NLRI_RCD, NLRI_ACC.
+    """
+    results = []
+    if not text:
+        return results
+    lines = text.splitlines()
+    ip_line_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+')
+    header_re = re.compile(r'^\s*Neighbor\s+.*NLRI\s+Rcd', re.IGNORECASE)
+    i = 0
+    while i < len(lines):
+        if header_re.match(lines[i]):
+            i += 1
+            while i < len(lines) and re.match(r'^\s*-{4,}', lines[i]):
+                i += 1
+            while i < len(lines):
+                line = lines[i]
+                if not ip_line_re.match(line):
+                    break
+                parts = re.split(r'\s+', line.strip())
+                if len(parts) < 4:
+                    i += 1
+                    continue
+                neighbor = parts[0]
+                asn = parts[1]
+                raw_state = parts[2]
+                norm_state = re.sub(r'\d', '', raw_state)
+                ls = norm_state.lower()
+                if ls.startswith("estab"):
+                    state = "Established"
+                elif ls.startswith("idle"):
+                    state = "Idle"
+                elif ls.startswith("active"):
+                    state = "Active"
+                else:
+                    state = norm_state
+                ints = [p for p in parts if p.isdigit()]
+                nlri_rcd = nlri_acc = None
+                if len(ints) >= 2:
+                    nlri_rcd = int(ints[-2]); nlri_acc = int(ints[-1])
+                elif len(ints) == 1:
+                    nlri_rcd = nlri_acc = int(ints[-1])
+                results.append({
+                    "NEIGHBOR": neighbor,
+                    "AS": asn,
+                    "STATE": state,
+                    "NLRI_RCD": nlri_rcd,
+                    "NLRI_ACC": nlri_acc
+                })
+                i += 1
+        i += 1
+    return results
+
+def _get_parser():
+    """Lazy loader to avoid circular import with cli_parsers. Adds fallback if textfsm unavailable."""
+    parser = None
+    try:
+        from .cli_parsers import NetworkParsers
+        parser = NetworkParsers()
+    except Exception:
+        parser = None
+    # Patch parse_bgp_summary if TextFSM missing or raises AttributeError
+    if parser:
+        need_fallback = False
+        try:
+            import textfsm  # noqa
+            if not (hasattr(textfsm, "TextFSM") and hasattr(textfsm, "TextFSMTemplateError")):
+                need_fallback = True
+        except Exception:
+            need_fallback = True
+        orig = getattr(parser, "parse_bgp_summary", None)
+        if need_fallback or orig is None:
+            parser.parse_bgp_summary = _fallback_parse_bgp_summary
+        else:
+            def _safe_parse_bgp_summary(txt):
+                try:
+                    return orig(txt)
+                except Exception:
+                    return _fallback_parse_bgp_summary(txt)
+            parser.parse_bgp_summary = _safe_parse_bgp_summary
+    return parser
+
+# --- Ensure InterfacesStatusCount exists (placeholder if already defined) ---
 class InterfacesStatusCount:
     # ...existing code...
-    def __init__(self):
-        self.content = self.read_pre_check_file()
+    def __init__(self, content: str = ""):
+        self.content = content or ""
     def read_pre_check_file(self):
         file_path = os.path.join(os.path.dirname(__file__), 'test.txt')
         try:
@@ -76,8 +172,9 @@ class InterfacesStatusCount:
 
 class BgpStatus:
     # ...existing code...
-    def __init__(self,content):
-        self.content=content
+    def __init__(self, content: str):
+        self.content = content or ""
+
     def _bgp_lines(self):
         if not self.content: return []
         lines=self.content.splitlines()
@@ -170,95 +267,132 @@ class BgpStatus:
         self._print_nlri_table(nlri)
         evpn=self.get_evpn_prefix_info()
         self._print_evpn_table(evpn)
-
-class RouteSummary:
-    # ...existing code...
-    def __init__(self,raw:str):
-        self.raw=raw; self.parser=NetworkParsers()
-    def rows(self): return self.parser.parse_ip_route_summary(self.raw)
-    def print(self):
-        rows=self.rows()
-        if not rows:
-            print("\nRoute Source Table: none"); return
-        counted=[r for r in rows if r.get("COUNT") is not None]
-        name_width=max(len(r["SOURCE"]) for r in counted) if counted else len("SOURCE")
-        target_width=max(name_width,60)
-        print("\nRoute Source Table (class):")
+    def print_bgp_summary_enhanced(self):
+        """
+        Enhanced BGP summary output:
+        Neighbor count = <total>
+        Session state : Established = <established_total>
+        <NEIGHBOR>  NLRI Rcd = <NLRI_RCD> NLRI Acc = <NLRI_ACC>
+        """
+        parser = _get_parser()
+        parse_fn = getattr(parser, "parse_bgp_summary", None) if parser else None
+        if not parse_fn:
+            print("\ncommand executed: show bgp summary (enhanced)")
+            print("Neighbor count = 0")
+            print("Session state : Established = 0")
+            return
+        try:
+            rows = parse_fn(getattr(self, "content", "") or "")
+        except Exception:
+            rows = _fallback_parse_bgp_summary(getattr(self, "content", "") or "")
+        estab = sum(1 for r in rows if re.sub(r"\d", "", (r.get("STATE") or "")).lower().startswith("estab"))
+        print("\ncommand executed: show bgp summary (enhanced)")
+        print(f"Neighbor count = {len(rows)}")
+        print(f"Session state : Established = {estab}")
         for r in rows:
-            cnt=r.get("COUNT")
-            if cnt is None: print(r.get("SOURCE",""))
-            else: print(f"{r.get('SOURCE','').ljust(target_width)}{str(cnt).rjust(4)}")
-        print("")
+            nbr = r.get("NEIGHBOR", "?")
+            rcd = r.get("NLRI_RCD")
+            acc = r.get("NLRI_ACC") if r.get("NLRI_ACC") is not None else rcd
+            rcd_s = str(rcd) if rcd is not None else "?"
+            acc_s = str(acc) if acc is not None else "?"
+            print(f"{nbr}  NLRI Rcd = {rcd_s} NLRI Acc = {acc_s}")
+
+# --- Added simple print helper classes (minimal) ---
+class RouteSummary:
+    def __init__(self, content: str):
+        self.content = content or ""
+    def print(self):
+        parser = _get_parser()
+        rows = parser.parse_ip_route_summary(self.content) if parser else []
+        print("\nRoute Summary (class):")
+        if not rows:
+            print("None"); return
+        for r in rows:
+            src = r.get("SOURCE")
+            cnt = r.get("COUNT")
+            if cnt is None:
+                print(src)
+            else:
+                print(f"{src}: {cnt}")
 
 class IgmpSnoopingQuerier:
-    # ...existing code...
-    def __init__(self,raw:str):
-        self.raw=raw; self.parser=NetworkParsers()
-    def data(self): return self.parser.parse_igmp_snooping_querier(self.raw)
+    def __init__(self, content: str):
+        self.content = content or ""
     def print(self):
-        d=self.data()
-        print("\nshow igmp snooping querier (class):")
-        if not d["lines"]:
-            print("No output."); return
-        for l in d["lines"]: print(l)
-        print(f"VLAN record count: {d['vlan_count']}")
+        parser = _get_parser()
+        result = parser.parse_igmp_snooping_querier(self.content) if parser else {"lines": [], "vlan_count": 0}
+        print("\nIGMP Snooping Querier (class):")
+        lines = result.get("lines", [])
+        if not lines:
+            print("None"); return
+        for l in lines:
+            print(l)
+        print(f"VLAN count: {result.get('vlan_count')}")
 
 class VlanBrief:
-    # ...existing code...
-    def __init__(self,raw:str):
-        self.raw=raw; self.parser=NetworkParsers()
-    def rows(self): return self.parser.parse_vlan_brief(self.raw)
+    def __init__(self, content: str):
+        self.content = content or ""
     def print(self):
-        rows=self.rows()
-        print("\nshow vlan brief (class):")
-        if not rows: print("No data."); return
-        v_w=max(len("VLAN"),*(len(r["VLAN"]) for r in rows))
-        n_w=max(len("Name"),*(len(r["NAME"]) for r in rows))
-        s_w=max(len("Status"),*(len(r["STATUS"]) for r in rows))
-        header=f"{'VLAN'.ljust(v_w)}  {'Name'.ljust(n_w)}  {'Status'.ljust(s_w)}  Ports"
-        print(header); print("-"*len(header))
+        parser = _get_parser()
+        rows = parser.parse_vlan_brief(self.content) if parser else []
+        print("\nVLAN Brief (class):")
+        if not rows:
+            print("None"); return
         for r in rows:
-            print(f"{r['VLAN'].ljust(v_w)}  {r['NAME'].ljust(n_w)}  {r['STATUS'].ljust(s_w)}  {r['PORTS']}")
-        print("-"*len(header)); print(f"Total VLANs: {len(rows)}")
+            print(f"{r.get('VLAN')} {r.get('NAME')} {r.get('STATUS')} {r.get('PORTS')}")
 
 class VlanDynamic:
-    # ...existing code...
-    def __init__(self,raw:str):
-        self.raw=raw; self.parser=NetworkParsers()
-    def rows(self): return self.parser.parse_vlan_dynamic(self.raw)
+    def __init__(self, content: str):
+        self.content = content or ""
     def print(self):
-        rows=self.rows()
-        print("\nshow vlan dynamic (class):")
-        if not rows: print("No data."); return
-        v_w=max(len("VLAN"),*(len(r["VLAN"]) for r in rows))
-        n_w=max(len("Name"),*(len(r["NAME"]) for r in rows))
-        s_w=max(len("Status"),*(len(r["STATUS"]) for r in rows))
-        header=f"{'VLAN'.ljust(v_w)}  {'Name'.ljust(n_w)}  {'Status'.ljust(s_w)}  Ports"
-        print(header); print("-"*len(header))
+        parser = _get_parser()
+        rows = parser.parse_vlan_dynamic(self.content) if parser else []
+        print("\nVLAN Dynamic (class):")
+        if not rows:
+            print("None"); return
         for r in rows:
-            print(f"{r['VLAN'].ljust(v_w)}  {r['NAME'].ljust(n_w)}  {r['STATUS'].ljust(s_w)}  {r['PORTS']}")
-        print("-"*len(header)); print(f"Total Dynamic VLANs: {len(rows)}")
+            print(f"{r.get('VLAN')} {r.get('NAME')} {r.get('STATUS')} {r.get('PORTS')}")
 
 class EvpnRouteTypes:
-    # ...existing code...
-    def __init__(self,raw:str):
-        self.raw=raw; self.parser=NetworkParsers()
-    def auto_discovery(self): return self.parser.parse_bgp_evpn_route_type_auto_discovery(self.raw)
-    def mac_ip(self): return self.parser.parse_bgp_evpn_route_type_mac_ip(self.raw)
-    def imet(self): return self.parser.parse_bgp_evpn_route_type_imet(self.raw)
-    def ethernet_segment(self):
-        fn=getattr(self.parser,"parse_bgp_evpn_route_type_ethernet_segment",None)
-        return fn(self.raw) if fn else []
-    def _count(self,rows,key):
-        c={}
-        for r in rows:
-            v=r.get(key)
-            if v: c[v]=c.get(v,0)+1
-        return c
+    def __init__(self, content: str):
+        self.content = content or ""
     def print_summary(self):
+        parser = _get_parser()
+        counts = {}
+        if parser:
+            for key, fn_name in {
+                "auto-discovery": "parse_bgp_evpn_route_type_auto_discovery",
+                "mac-ip": "parse_bgp_evpn_route_type_mac_ip",
+                "imet": "parse_bgp_evpn_route_type_imet",
+                "ethernet-segment": "parse_bgp_evpn_route_type_ethernet_segment",
+            }.items():
+                fn = getattr(parser, fn_name, None)
+                if fn:
+                    counts[key] = len(fn(self.content) or [])
         print("\nEVPN Route-Type Summary (class):")
-        ad=self.auto_discovery(); mac=self.mac_ip(); im=self.imet(); eth=self.ethernet_segment()
-        print(f"auto-discovery: {len(ad)} entries")
-        print(f"mac-ip: {len(mac)} entries")
-        print(f"imet: {len(im)} entries")
-        if eth: print(f"ethernet-segment: {len(eth)} entries")
+        if not counts:
+            print("None"); return
+        for k, v in counts.items():
+            print(f"{k}: {v} entries")
+
+class VXLAN:
+    """Wrapper for 'show vxlan vtep detail' output."""
+    def __init__(self, content: str):
+        self.content = content or ""
+        parser = _get_parser()
+        self.vteps = []
+        parse_fn = getattr(parser, "parse_vxlan_vtep_detail", None) if parser else None
+        if parse_fn:
+            try:
+                self.vteps = parse_fn(self.content) or []
+            except Exception:
+                self.vteps = []
+
+    def print_vtep_detail(self):
+        print("\nCommand executed:\nshow vxlan vtep detail")
+        if not self.vteps:
+            print("No VTEP detail data found.")
+            return
+        print(f"VTEP count: {len(self.vteps)}")
+        for r in self.vteps:
+            print(f"  {r['VTEP']}  LearnedVia={r['LEARNED_VIA']}  MACLearning={r['MAC_LEARNING']}  TunnelTypes={r['TUNNEL_TYPES']}")

@@ -26,9 +26,9 @@ Neighbor              AS Session State AFI/SAFI                AFI/SAFI State   
 ------------ ----------- ------------- ----------------------- -------------- ---------- ----------
 10.4.224.1   64100.21001 Established   IPv4 Unicast            Negotiated             59         59
 10.4.224.129 64100.21002 Established   IPv4 Unicast            Negotiated             58         58
-10.4.225.1   64100.21003 Established   IPv4 Unicast            Negotiated             58         58
+10.4.225.1   64100.21003 Established   IPv4 Unicast            Negotiated             57         58
 10.4.228.1   64100.21001 Established   L2VPN EVPN              Negotiated           3861       3861
-10.4.228.2   64100.21002 Established   L2VPN EVPN              Negotiated           3862       3862
+10.4.228.2   64100.21002 Establi6shed   L2VPN EVPN              Negotiated           3862       3862
 10.4.228.3   64100.21003 Established   L2VPN EVPN              Negotiated           3862       3862
 EMEA-UK-LON-THN2-MBL51#
 
