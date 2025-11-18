@@ -310,6 +310,24 @@ def _strip_plain_bgp_summary(text: str) -> str:
         out.append(line)
     return "\n".join(out)
 
+def _print_bgp_summary_ipv4(raw: str):
+    """
+    Same logic style as _print_bgp_evpn_summary but for 'sh bgp summary'.
+    Uses NetworkParsers.parse_bgp_summary (neighbor table) for counts.
+    Adds explicit neighbor IP list for verification.
+    """
+    parser = NetworkParsers()
+    rows = parser.parse_bgp_summary(raw)
+    print("\nCommand executed:\nsh bgp summary")
+    if not rows:
+        print("No BGP summary neighbor data found.")
+        return
+    estab = sum(1 for r in rows if (r.get("STATE","").lower().startswith("estab")))
+    neighbors = [r.get("NEIGHBOR") for r in rows if r.get("NEIGHBOR")]
+    # Explicit verification printout
+    print(f"Neighbor count: {len(rows)} Established: {estab}")
+    print(f"Neighbor IPs ({len(neighbors)}): {' '.join(neighbors)}")
+
 def main():
     _buf = io.StringIO()
     _real_stdout = sys.stdout
@@ -319,6 +337,11 @@ def main():
         isc.display_results()
         bgp = BgpStatus(isc.content)
         bgp.print_bgp_status()
+        # NEW unified IPv4 BGP summary using same logic style as EVPN summary
+        _print_bgp_summary_ipv4(isc.content)
+        # (old basic summary retained; can remove later)
+        from .eos_cli import BgpSummaryBasic
+        BgpSummaryBasic(isc.content).print_basic()
         up, down = isc.count_ip_interfaces()
         conn, dis = isc.count_interfaces()
         est = bgp.count_established_sessions()
@@ -612,9 +635,15 @@ class NetworkParsers(NetworkParsers):
         # Locate header line
         header_idx = None
         for i, line in enumerate(lines):
-            if re.search(r'\bVTEP\s+Learned Via\s+MAC Address Learning', line):
+            if re.search(r'\bVTEP\s+Learn(ed)?\s+Via\s+MAC\s+(Address\s+)?Learning', line, re.IGNORECASE):
                 header_idx = i
                 break
+        # NEW fallback: if header not found, try to locate command block start
+        if header_idx is None:
+            for i, line in enumerate(lines):
+                if "show vxlan vtep detail" in line.lower():
+                    header_idx = i
+                    break
         if header_idx is None:
             return results
 
@@ -650,6 +679,20 @@ class NetworkParsers(NetworkParsers):
                 "TUNNEL_TYPES": tunnel_types.strip()
             })
             i += 1
+        # NEW: if no results but we saw "Total number of remote VTEPS", attempt simple IP-only extraction
+        if not results:
+            ip_only = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+')
+            for line in lines[header_idx:]:
+                if line.lower().startswith("total number of remote vteps"):
+                    break
+                m = ip_only.match(line)
+                if m:
+                    results.append({
+                        "VTEP": m.group(1),
+                        "LEARNED_VIA": "",
+                        "MAC_LEARNING": "",
+                        "TUNNEL_TYPES": ""
+                    })
         return results
 
 # ---- Add parser for 'show mac address-table dynamic' if missing ----
@@ -817,3 +860,116 @@ class NetworkParsers(NetworkParsers):
             "total_ports": total_ports,
             "total_entries": len(entries)
         }
+
+# FINAL override to guarantee presence of parse_bgp_summary
+class NetworkParsers(NetworkParsers):
+    def parse_bgp_summary(self, text: str):
+        """
+        Robust parser for 'show bgp summary' neighbor table.
+        Primary mode: locate header containing 'Neighbor' and 'NLRI Rcd'.
+        Fallback: if header not found, scan the command block following the
+        'show bgp summary' line and treat consecutive IP-starting lines as
+        neighbor rows.
+        Returns list of dicts:
+          NEIGHBOR, AS, STATE, NLRI_RCD, NLRI_ACC
+        """
+        results = []
+        if not text:
+            return results
+        lines = [l.rstrip("\r") for l in text.splitlines()]
+        ip_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\b')
+        header_index = None
+
+        for i, l in enumerate(lines):
+            if "Neighbor" in l and re.search(r'NLRI\s+Rcd', l):
+                header_index = i
+                break
+
+        def _normalize_state(tok: str):
+            clean = re.sub(r'\d', '', tok or '')
+            low = clean.lower()
+            if low.startswith("estab"):
+                return "Established"
+            if low.startswith("idle"):
+                return "Idle"
+            if low.startswith("active"):
+                return "Active"
+            return clean
+
+        def _extract_nlri(parts):
+            ints = [p for p in parts if p.isdigit()]
+            nlri_rcd = nlri_acc = None
+            if len(ints) >= 2:
+                nlri_rcd = int(ints[-2]); nlri_acc = int(ints[-1])
+            elif len(ints) == 1:
+                nlri_rcd = nlri_acc = int(ints[-1])
+            return nlri_rcd, nlri_acc
+
+        # Primary parse (header present)
+        if header_index is not None:
+            i = header_index + 1
+            while i < len(lines) and set(lines[i].strip()) <= {"-"}:
+                i += 1
+            while i < len(lines):
+                line = lines[i]
+                if not ip_re.match(line):
+                    break
+                parts = re.split(r'\s+', line.strip())
+                if len(parts) < 3:
+                    i += 1
+                    continue
+                neighbor = parts[0]
+                asn = parts[1]
+                state_tok = parts[2]
+                state = _normalize_state(state_tok)
+                nlri_rcd, nlri_acc = _extract_nlri(parts)
+                results.append({
+                    "NEIGHBOR": neighbor,
+                    "AS": asn,
+                    "STATE": state,
+                    "NLRI_RCD": nlri_rcd,
+                    "NLRI_ACC": nlri_acc
+                })
+                i += 1
+            if results:
+                return results  # success
+
+        # Fallback: find command trigger
+        cmd_idx = None
+        for i, l in enumerate(lines):
+            if "bgp summary" in l.lower():
+                cmd_idx = i
+                break
+        if cmd_idx is None:
+            return results  # no command found; nothing to do
+
+        i = cmd_idx + 1
+        while i < len(lines):
+            line = lines[i]
+            if line.strip() == "" or (line.startswith("#sh") and "bgp" in line.lower() and "summary" not in line.lower()):
+                break
+            if line.startswith("Command executed:"):
+                break
+            if ip_re.match(line):
+                parts = re.split(r'\s+', line.strip())
+                if len(parts) >= 3:
+                    neighbor = parts[0]
+                    asn = parts[1]
+                    state_tok = parts[2]
+                    state = _normalize_state(state_tok)
+                    nlri_rcd, nlri_acc = _extract_nlri(parts)
+                    results.append({
+                        "NEIGHBOR": neighbor,
+                        "AS": asn,
+                        "STATE": state,
+                        "NLRI_RCD": nlri_rcd,
+                        "NLRI_ACC": nlri_acc
+                    })
+                i += 1
+                continue
+            # stop fallback block when first non-IP, non-empty encountered after some rows
+            if results:
+                break
+            i += 1
+        return results
+    # ...existing code...

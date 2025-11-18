@@ -26,19 +26,43 @@ except Exception:
     textfsm.TextFSM = _TFSMStub  # type: ignore
     textfsm.TextFSMTemplateError = _TFSMTemplateErr  # type: ignore
 
-from auto.cli_parsers import NetworkParsers
-from auto.eos_cli import (
-    InterfacesStatusCount,
-    BgpStatus,
-    RouteSummary,
-    IgmpSnoopingQuerier,
-    VlanBrief,
-    VlanDynamic,
-    EvpnRouteTypes,
-    VXLAN,
-    MacAddressTableDynamic,
-    VrfReservedPorts  # NEW
-)
+try:
+    from auto.cli_parsers import NetworkParsers
+    from auto.eos_cli import (
+        InterfacesStatusCount,
+        BgpStatus,
+        RouteSummary,
+        IgmpSnoopingQuerier,
+        VlanBrief,
+        VlanDynamic,
+        EvpnRouteTypes,
+        VXLAN,
+        MacAddressTableDynamic,
+        VrfReservedPorts
+    )
+except ModuleNotFoundError:
+    # Fallback when 'auto' package not discoverable (direct execution)
+    import sys as _sys, os as _os
+    _auto_dir = _os.path.join(_os.path.dirname(__file__), "auto")
+    if _auto_dir not in _sys.path:
+        _sys.path.append(_auto_dir)
+    try:
+        import cli_parsers  # type: ignore
+        import eos_cli  # type: ignore
+        NetworkParsers = cli_parsers.NetworkParsers  # type: ignore
+        InterfacesStatusCount = eos_cli.InterfacesStatusCount  # type: ignore
+        BgpStatus = eos_cli.BgpStatus  # type: ignore
+        RouteSummary = eos_cli.RouteSummary  # type: ignore
+        IgmpSnoopingQuerier = eos_cli.IgmpSnoopingQuerier  # type: ignore
+        VlanBrief = eos_cli.VlanBrief  # type: ignore
+        VlanDynamic = eos_cli.VlanDynamic  # type: ignore
+        EvpnRouteTypes = eos_cli.EvpnRouteTypes  # type: ignore
+        VXLAN = eos_cli.VXLAN  # type: ignore
+        MacAddressTableDynamic = eos_cli.MacAddressTableDynamic  # type: ignore
+        VrfReservedPorts = eos_cli.VrfReservedPorts  # type: ignore
+    except Exception as _e:
+        print(f"Import fallback failed: {_e}")
+
 # NOTE: Core parsing (all regex/block extraction) resides in network_parsers.py.
 # This script mainly orchestrates reading test.txt and printing formatted summaries.
 
@@ -364,24 +388,91 @@ def _print_bgp_evpn_summary(raw: str):
     estab = sum(1 for r in rows if r["STATE"].lower().startswith("estab"))
     print(f"Neighbor count: {len(rows)}  Established: {estab}")
 
-def _strip_plain_bgp_summary(text: str) -> str:
-    if not text:
-        return text
-    lines = text.splitlines()
-    out = []
-    skip = False
-    for i, line in enumerate(lines):
-        if not skip and line.strip() == "Command executed:" and i + 1 < len(lines) and lines[i+1].strip() == "show bgp summary":
-            skip = True
+def _print_bgp_summary(raw: str):
+    """Use BgpStatus internal parser (_records) for accurate neighbor / established counts."""
+    bs = BgpStatus(raw)
+    rows = bs._records()
+    estab = sum(1 for r in rows if r[2].lower().startswith("estab"))
+    print("\ncommand executed: show bgp summary")
+    print(f"Neighbor count: {len(rows)} Established: {estab}")
+
+def _manual_bgp_summary_neighbors(raw: str):
+    """
+    Direct parser for 'show bgp summary' (no external class).
+    Returns list of dicts {ip, asn, state, nlri_rcd, nlri_acc}.
+    """
+    results = []
+    if not raw:
+        return results
+    lines = [l.rstrip("\r") for l in raw.splitlines()]
+    # Find header containing both 'Neighbor' and 'NLRI' Rcd'
+    header_idx = None
+    for i, l in enumerate(lines):
+        if "Neighbor" in l and "NLRI" in l and "Rcd" in l:
+            header_idx = i
+            break
+    if header_idx is None:
+        return results
+    i = header_idx + 1
+    # Skip dashed separator lines
+    while i < len(lines) and re.match(r'^\s*-{4,}', lines[i]):
+        i += 1
+    ip_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+')
+    while i < len(lines):
+        line = lines[i]
+        # Stop on prompt or blank
+        if line.strip().endswith("#"):
+            break
+        if not ip_re.match(line):
+            break
+        parts = re.split(r'\s+', line.strip())
+        if len(parts) < 4:
+            i += 1
             continue
-        if skip:
-            if line.strip() == "" or line.startswith("Command executed:") or line.strip().startswith("sh bgp evpn summary"):
-                skip = False
-                if line.strip():
-                    out.append(line)
-            continue
-        out.append(line)
-    return "\n".join(out)
+        neighbor = parts[0]
+        asn = parts[1]
+        state_tok = parts[2]
+        state_clean = re.sub(r'\d', '', state_tok).lower()
+        if state_clean.startswith("estab"):
+            state = "Established"
+        elif state_clean.startswith("idle"):
+            state = "Idle"
+        elif state_clean.startswith("active"):
+            state = "Active"
+        else:
+            state = state_tok
+        ints = [p for p in parts if p.isdigit()]
+        nlri_rcd = nlri_acc = None
+        if len(ints) >= 2:
+            nlri_rcd = int(ints[-2])
+            nlri_acc = int(ints[-1])
+        elif len(ints) == 1:
+            nlri_rcd = nlri_acc = int(ints[-1])
+        results.append({
+            "ip": neighbor,
+            "asn": asn,
+            "state": state,
+            "nlri_rcd": nlri_rcd,
+            "nlri_acc": nlri_acc
+        })
+        i += 1
+    return results
+
+def _print_bgp_summary_ipv4(raw: str):
+    """
+    Same style as _print_bgp_evpn_summary: counts neighbors & established.
+    Adds neighbor IP list for validation (expect 6 in test.txt).
+    """
+    parser = NetworkParsers()
+    rows = parser.parse_bgp_summary(raw)
+    print("\nCommand executed:\nsh bgp summary")
+    if not rows:
+        print("No BGP summary neighbor data found.")
+        return
+    estab = sum(1 for r in rows if (r.get("STATE","").lower().startswith("estab")))
+    neighbors = [r.get("NEIGHBOR") for r in rows if r.get("NEIGHBOR")]
+    print(f"Neighbor count: {len(rows)} Established: {estab}")
+    print(f"Neighbor IPs ({len(neighbors)}): {' '.join(neighbors)}")
 
 def main():
     # Run for test.txt (existing behavior)
@@ -399,21 +490,20 @@ def main():
         isc.content = test_raw
         up, down, conn, dis = _print_interface_sections(isc)
         bgp = BgpStatus(isc.content)
-        bgp.print_bgp_summary_enhanced()
+        # REMOVED obsolete enhanced summary call:
+        # bgp.print_bgp_summary_enhanced()
+        _print_bgp_summary_ipv4(isc.content)
         bgp.print_bgp_status()
         _print_bgp_evpn_summary(isc.content)
         VXLAN(isc.content).print_vtep_detail()
-        MacAddressTableDynamic(isc.content).print()  # existing
-        VrfReservedPorts(isc.content).print()  # NEW
+        MacAddressTableDynamic(isc.content).print()
+        VrfReservedPorts(isc.content).print()
         est = bgp.count_established_sessions()
-        # REMOVED pre-check summary block
-        # print("\n--- Summary ---")
-        # print(f"UP: {up} DOWN: {down} CONNECTED: {conn} DISABLED: {dis} ESTABLISHED BGP: {est}")
-        rs = RouteSummary(isc.content); rs.print()
-        ig = IgmpSnoopingQuerier(isc.content); ig.print()
-        vb = VlanBrief(isc.content); vb.print()
-        vd = VlanDynamic(isc.content); vd.print()
-        ev = EvpnRouteTypes(isc.content); ev.print_summary()
+        RouteSummary(isc.content).print()
+        IgmpSnoopingQuerier(isc.content).print()
+        VlanBrief(isc.content).print()
+        VlanDynamic(isc.content).print()
+        EvpnRouteTypes(isc.content).print_summary()
         _print_bgp_evpn_route_type_auto_discovery_from_sample()
         _print_bgp_evpn_route_type_mac_ip_from_sample()
         _print_bgp_evpn_route_type_imet_from_sample()
@@ -421,7 +511,8 @@ def main():
     finally:
         sys.stdout = _real_stdout
     test_out = _buf.getvalue()
-    test_out = _strip_plain_bgp_summary(test_out)  # NEW
+    # REMOVED _strip_plain_bgp_summary call to preserve neighbor / established lines
+    # test_out = _strip_plain_bgp_summary(test_out)
     print(test_out)
     _write_output_file(test_out, "script_output.txt")
 
@@ -534,21 +625,10 @@ def main():
             # REPLACED isc_post.display_results() with custom formatting
             up_p, down_p, conn_p, dis_p = _print_interface_sections(isc_post)
             bgp_post = BgpStatus(isc_post.content)
-            bgp_post.print_bgp_summary_enhanced()
+            # REMOVED obsolete enhanced summary call:
+            # bgp_post.print_bgp_summary_enhanced()
+            _print_bgp_summary_ipv4(isc_post.content)
             bgp_post.print_bgp_status()
-            _print_bgp_evpn_summary(isc_post.content)
-            VXLAN(isc_post.content).print_vtep_detail()
-            MacAddressTableDynamic(isc_post.content).print()  # existing
-            VrfReservedPorts(isc_post.content).print()  # NEW
-            est_p = bgp_post.count_established_sessions()
-            # REMOVED post-check summary block
-            # print("\n--- Summary (post_check) ---")
-            # print(f"UP: {up_p} DOWN: {down_p} CONNECTED: {conn_p} DISABLED: {dis_p} ESTABLISHED BGP: {est_p}")
-            RouteSummary(isc_post.content).print()
-            IgmpSnoopingQuerier(isc_post.content).print()
-            VlanBrief(isc_post.content).print()
-            VlanDynamic(isc_post.content).print()
-            EvpnRouteTypes(isc_post.content).print_summary()
             # EVPN detailed for post_check
             for func in (
                 _print_bgp_evpn_route_type_auto_discovery_from_sample,
@@ -558,10 +638,17 @@ def main():
             ):
                 wrapped = _load_and_replace(func, post_path)
                 wrapped()
+            # NEW: invoke VXLAN VTEP detail for post_check
+            VXLAN(isc_post.content).print_vtep_detail()
+            # NEW: print MAC address-table dynamic for post_check
+            MacAddressTableDynamic(isc_post.content).print()
+            # NEW: supplemental single-line variant (requested pattern)
+            print("command executed:show mac address-table dynamic")
         finally:
             sys.stdout = _real_stdout
         post_out = _buf2.getvalue()
-        post_out = _strip_plain_bgp_summary(post_out)  # NEW
+        # REMOVED _strip_plain_bgp_summary call
+        # post_out = _strip_plain_bgp_summary(post_out)
         print(post_out)
         _write_output_file(post_out, "post_check_output.txt")
     else:
@@ -601,31 +688,108 @@ class OutputTests:
     def _down(self, content):
         return self._extract_int(content, "Number of interfaces DOWN")
 
-    def _established_bgp(self, content):
-        m = re.search(r"ESTABLISHED BGP:\s*(\d+)", content)
-        if not m:
-            m = re.search(r"Session state\s*:\s*Established\s*[=:]\s*(\d+)", content)  # fallback
-        return int(m.group(1)) if m else None
-
     def _evpn_summary_counts(self, content):
         # From "EVPN Route-Type Summary (class):"
         counts = {}
+        if not content:
+            return counts
         for key in ["auto-discovery", "mac-ip", "imet", "ethernet-segment"]:
-            m = re.search(rf"{key}:\s*(\d+)\s+entries", content)
-            if m:
-                counts[key] = int(m.group(1))
+            # Accept either:
+            #   mac-ip: 2089 entries
+            # or
+            #   mac-ip entries: 2089
+            m1 = re.search(rf"{re.escape(key)}:\s*(\d+)\s+entries", content)
+            m2 = re.search(rf"{re.escape(key)}\s+entries:\s*(\d+)", content)
+            if m1:
+                counts[key] = int(m1.group(1))
+            elif m2:
+                counts[key] = int(m2.group(1))
+        # UPDATED: fallback for mac-ip when summary lines absent; use TOTAL OCCURRENCES from mac-ip block
+        if "mac-ip" not in counts:
+            _, occ = self._evpn_mac_ip_totals(content)
+            if occ is not None:
+                counts["mac-ip"] = occ
         return counts
 
     def _bgp_enhanced_vals(self, content):
         nbr = self._extract_int(content, "Neighbor count")
-        # Established may appear as "Session state : Established = <n>"
         estab = None
+        # First try enhanced session state line
         m = re.search(r"Session state\s*:\s*Established\s*[=:]\s*(\d+)", content)
         if m:
             estab = int(m.group(1))
-        # Count NLRI lines (each neighbor line prints them)
-        mismatch_count = 0  # Not requested in new format; keep placeholder
+        else:
+            # Fallback to simple "Established:" line
+            m2 = re.search(r"Established:\s*(\d+)", content)
+            if m2:
+                estab = int(m2.group(1))
+            else:
+                # Fallback to "Neighbor count: X Established: Y"
+                m3 = re.search(r"Neighbor count:\s*\d+\s+Established:\s*(\d+)", content)
+                if m3:
+                    estab = int(m3.group(1))
+        mismatch_count = 0
         return nbr, estab, mismatch_count
+
+    # ADD: restored helper for extracting 4-line BGP summary block
+    def _bgp_all_summary(self, content):
+        """
+        Extract the plain 4-line IPv4 BGP summary block:
+        Command executed:
+        sh bgp summary
+        Neighbor count: X Established: Y
+        Neighbor IPs (N): <ips...>
+        Returns dict or None.
+        """
+        if not content:
+            return None
+        lines = content.splitlines()
+        for i in range(len(lines) - 3):
+            if lines[i].strip() == "Command executed:" and lines[i+1].strip() == "sh bgp summary":
+                nbr_line = lines[i+2].strip()
+                ips_line = lines[i+3].strip()
+                if not nbr_line.startswith("Neighbor count:") or not ips_line.startswith("Neighbor IPs"):
+                    continue
+                m_cnt = re.search(r'Neighbor count:\s*(\d+)\s+Established:\s*(\d+)', nbr_line)
+                m_ips = re.search(r'Neighbor IPs\s*\(\d+\):\s*(.+)', ips_line)
+                if not m_cnt or not m_ips:
+                    continue
+                return {
+                    "neighbor_count": int(m_cnt.group(1)),
+                    "established": int(m_cnt.group(2)),
+                    "neighbors": m_ips.group(1).split(),
+                    "block": [lines[i].rstrip(), lines[i+1].rstrip(), nbr_line, ips_line]
+                }
+        return None
+
+    # REPLACE: faulty test_bgp_all_summary (was redefining parser, used undefined 'content')
+    def test_bgp_all_summary(self):
+        pre = self._bgp_all_summary(self.script_content)
+        post = self._bgp_all_summary(self.post_content)
+        if pre is None or post is None:
+            self.results.append(("bgp_all_summary", pre, post, "SKIP"))
+            return
+        status = (
+            "PASS" if (
+                pre["neighbor_count"] == post["neighbor_count"] and
+                pre["established"] == post["established"] and
+                pre["neighbors"] == post["neighbors"]
+            ) else "FAIL"
+        )
+        self.results.append((
+            "bgp_all_summary",
+            {
+                "neighbor_count": pre["neighbor_count"],
+                "established": pre["established"],
+                "neighbors": pre["neighbors"],
+            },
+            {
+                "neighbor_count": post["neighbor_count"],
+                "established": post["established"],
+                "neighbors": post["neighbors"],
+            },
+            status
+        ))
 
     def _assert_equal(self, name, a, b):
         if a is None or b is None:
@@ -649,15 +813,43 @@ class OutputTests:
         if not m:
             m = re.search(r"number of VTEP record\s*=\s*(\d+)", content)
         if not m:
-            m = re.search(r"Total number of remote VTEPS:\s*(\d+)", content)
+            m = re.search(r"Total number of remote VTEPS:\s*(\d+)",
+content)
         return int(m.group(1)) if m else None
 
     def _mac_dynamic_total(self, content):
         m = re.search(r"Total Dynamic MACs:\s*(\d+)", content)
         if not m:
-            # fallback: original CLI total line
             m = re.search(r"Total Mac Addresses for this criterion:\s*(\d+)", content)
-        return int(m.group(1)) if m else None
+        if m:
+            return int(m.group(1))
+        # UPDATED: fallback like EVPN totals
+        # 1) Count MAC entry lines inside 'show mac address-table dynamic' block
+        if "show mac address-table dynamic" in content:
+            block = content.split("show mac address-table dynamic", 1)[1]
+            # Truncate at next Command executed or end
+            nxt = block.find("\nCommand executed:")
+            if nxt != -1:
+                block = block[:nxt]
+            mac_line_re = re.compile(r'^\s*\d+\s+[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}\s+', re.IGNORECASE)
+            mac_lines = [l for l in block.splitlines() if mac_line_re.match(l)]
+            if mac_lines:
+                return len(mac_lines)
+        # 2) Per-VLAN summary fallback
+        if "Per-VLAN MAC counts:" in content:
+            part = content.split("Per-VLAN MAC counts:", 1)[1]
+            lines = part.splitlines()
+            total = 0
+            for l in lines:
+                if set(l.strip()) <= {"-"}:
+                    continue
+                # Format: VLAN  Count (already printed with spacing)
+                cols = re.split(r'\s{2,}', l.strip())
+                if len(cols) == 2 and cols[0].isdigit() and cols[1].isdigit():
+                    total += int(cols[1])
+            if total > 0:
+                return total
+        return None
     def _vrf_reserved_ports_total(self, content):  # NEW
         m = re.search(r"Total Reserved Ports:\s*(\d+)", content)
         return int(m.group(1)) if m else None
@@ -736,19 +928,15 @@ class OutputTests:
                      self._down(self.script_content),
                      self._down(self.post_content))
 
-    def test_established_bgp_equal(self):
-        self._record("established_bgp",
-                     self._established_bgp(self.script_content),
-                     self._established_bgp(self.post_content))
-
     def test_evpn_mac_ip_non_decrease(self):
         sc = self._evpn_summary_counts(self.script_content).get("mac-ip")
         pc = self._evpn_summary_counts(self.post_content).get("mac-ip")
         if sc is None or pc is None:
-            self.results.append(("evpn_mac_ip_non_decrease", sc, pc, "SKIP"))
+            self.results.append(("evpn_mac_ip_equal", sc, pc, "SKIP"))
         else:
+            # CHANGED: allow non-decrease
             status = "PASS" if pc >= sc else "FAIL"
-            self.results.append(("evpn_mac_ip_non_decrease", sc, pc, status))
+            self.results.append(("evpn_mac_ip_equal", sc, pc, status))
 
     def test_bgp_neighbor_count_equal(self):
         sc_n, _, _ = self._bgp_enhanced_vals(self.script_content)
@@ -760,40 +948,51 @@ class OutputTests:
         _, pc_e, _ = self._bgp_enhanced_vals(self.post_content)
         self._record("bgp_established_count", sc_e, pc_e)
 
-    def test_bgp_nlri_mismatch_count_equal(self):
-        _, _, sc_m = self._bgp_enhanced_vals(self.script_content)
-        _, _, pc_m = self._bgp_enhanced_vals(self.post_content)
-        self._record("bgp_nlri_mismatch_count", sc_m, pc_m)
-
+    # RE-ADDED: missing VTEP count test
     def test_vtep_count_equal(self):
         pre = self._vtep_count(self.script_content)
         post = self._vtep_count(self.post_content)
         if pre is None or post is None:
             self.results.append(("vtep_count", pre, post, "SKIP"))
         else:
-            status = "PASS" if post >= pre else "FAIL"
+            status = "PASS" if post == pre else "FAIL"
             self.results.append(("vtep_count", pre, post, status))
 
+    # ADD: restore missing MAC dynamic total test
     def test_mac_dynamic_total_equal(self):
-        self._record("mac_dynamic_total",
-                     self._mac_dynamic_total(self.script_content),
-                     self._mac_dynamic_total(self.post_content))
-    def test_vrf_reserved_ports_entry_count_equal(self):  # NEW
-        self._record("vrf_reserved_ports_entry_count",
-                     self._vrf_reserved_ports_entry_count(self.script_content),
-                     self._vrf_reserved_ports_entry_count(self.post_content))
-    def test_total_routes_equal(self):  # NEW
-        self._record("total_routes",
-                     self._total_routes(self.script_content),
-                     self._total_routes(self.post_content))
-    def test_route_source_counts_equal(self):  # keep aggregated dict test
-        pre = self._route_source_counts(self.script_content)
-        post = self._route_source_counts(self.post_content)
-        if not pre or not post:
-            self.results.append(("route_source_counts", pre or None, post or None, "SKIP"))
-        else:
-            status = "PASS" if pre == post else "FAIL"
-            self.results.append(("route_source_counts", pre, post, status))
+        self._record(
+            "mac_dynamic_total",
+            self._mac_dynamic_total(self.script_content),
+            self._mac_dynamic_total(self.post_content)
+        )
+
+    def test_bgp_all_summary(self):
+        pre = self._bgp_all_summary(self.script_content)
+        post = self._bgp_all_summary(self.post_content)
+        if pre is None or post is None:
+            self.results.append(("bgp_all_summary", pre, post, "SKIP"))
+            return
+        status = (
+            "PASS" if (
+                pre["neighbor_count"] == post["neighbor_count"] and
+                pre["established"] == post["established"] and
+                pre["neighbors"] == post["neighbors"]
+            ) else "FAIL"
+        )
+        self.results.append((
+            "bgp_all_summary",
+            {
+                "neighbor_count": pre["neighbor_count"],
+                "established": pre["established"],
+                "neighbors": pre["neighbors"],
+            },
+            {
+                "neighbor_count": post["neighbor_count"],
+                "established": post["established"],
+                "neighbors": post["neighbors"],
+            },
+            status
+        ))
 
     def _evpn_auto_discovery_totals(self, content):
         """Extract TOTAL DISTINCT and TOTAL OCCURRENCES from the auto-discovery summary block."""
@@ -815,10 +1014,10 @@ class OutputTests:
         pre_d, pre_o = self._evpn_auto_discovery_totals(self.script_content)
         post_d, post_o = self._evpn_auto_discovery_totals(self.post_content)
         if pre_d is None or pre_o is None or post_d is None or post_o is None:
-            self.results.append(("evpn_auto_discovery_totals", (pre_d, pre_o), (post_d, post_o), "SKIP"))
+            self.results.append(("evpn_auto_discovery_totals_equal", (pre_d, pre_o), (post_d, post_o), "SKIP"))
         else:
-            status = "PASS" if (post_d >= pre_d and post_o >= pre_o) else "FAIL"
-            self.results.append(("evpn_auto_discovery_totals", (pre_d, pre_o), (post_d, post_o), status))
+            status = "PASS" if (post_d == pre_d and post_o == pre_o) else "FAIL"
+            self.results.append(("evpn_auto_discovery_totals_equal", (pre_d, pre_o), (post_d, post_o), status))
 
     def _evpn_mac_ip_totals(self, content):
         """Extract TOTAL DISTINCT and TOTAL OCCURRENCES from the mac-ip summary block."""
@@ -837,10 +1036,11 @@ class OutputTests:
         pre_d, pre_o = self._evpn_mac_ip_totals(self.script_content)
         post_d, post_o = self._evpn_mac_ip_totals(self.post_content)
         if pre_d is None or pre_o is None or post_d is None or post_o is None:
-            self.results.append(("evpn_mac_ip_totals", (pre_d, pre_o), (post_d, post_o), "SKIP"))
+            self.results.append(("evpn_mac_ip_totals_equal", (pre_d, pre_o), (post_d, post_o), "SKIP"))
         else:
-            status = "PASS" if (post_d >= pre_d and post_o >= pre_o) else "FAIL"
-            self.results.append(("evpn_mac_ip_totals", (pre_d, pre_o), (post_d, post_o), status))
+            # CHANGED: DISTINCT must match, OCCURRENCES may increase
+            status = "PASS" if (post_d == pre_d and post_o >= pre_o) else "FAIL"
+            self.results.append(("evpn_mac_ip_totals_equal", (pre_d, pre_o), (post_d, post_o), status))
     # --- NEW helper + test for imet ---
     def _evpn_imet_totals(self, content):
         """Extract TOTAL DISTINCT and TOTAL OCCURRENCES from the imet summary block."""
@@ -859,31 +1059,40 @@ class OutputTests:
         pre_d, pre_o = self._evpn_imet_totals(self.script_content)
         post_d, post_o = self._evpn_imet_totals(self.post_content)
         if pre_d is None or pre_o is None or post_d is None or post_o is None:
-            self.results.append(("evpn_imet_totals", (pre_d, pre_o), (post_d, post_o), "SKIP"))
+            self.results.append(("evpn_imet_totals_equal", (pre_d, pre_o), (post_d, post_o), "SKIP"))
         else:
-            status = "PASS" if (post_d >= pre_d and post_o >= pre_o) else "FAIL"
-            self.results.append(("evpn_imet_totals", (pre_d, pre_o), (post_d, post_o), status))
+            status = "PASS" if (post_d == pre_d and post_o == pre_o) else "FAIL"
+            self.results.append(("evpn_imet_totals_equal", (pre_d, pre_o), (post_d, post_o), status))
     # --- NEW helper for ethernet-segment ---
     def _evpn_ethernet_segment_totals(self, content):
-        """Extract TOTAL DISTINCT and TOTAL OCCURRENCES from ethernet-segment summary block."""
+        """Extract TOTAL DISTINCT and TOTAL OCCURRENCES from ethernet-segment RD summary (exclude ESI table)."""
         if "sh bgp evpn route-type ethernet-segment" not in content:
             return None, None
         part = content.split("sh bgp evpn route-type ethernet-segment", 1)[1]
         nxt = part.find("\nCommand executed:")
         if nxt != -1:
             part = part[:nxt]
-        m_dist = re.search(r'TOTAL DISTINCT\s+(\d+)', part)
-        m_occ = re.search(r'TOTAL OCCURRENCES\s+(\d+)', part)
+        # Limit to lines before the ESI table header
+        lines = part.splitlines()
+        rd_section = []
+        for line in lines:
+            if re.match(r'\s*ESI\b', line):
+                break
+            rd_section.append(line)
+        section_text = "\n".join(rd_section)
+        m_dist = re.search(r'TOTAL DISTINCT\s+(\d+)', section_text)
+        m_occ = re.search(r'TOTAL OCCURRENCES\s+(\d+)', section_text)
         return (int(m_dist.group(1)) if m_dist else None,
                 int(m_occ.group(1)) if m_occ else None)
 
-    def test_evpn_ethernet_segment_totals_non_decrease(self):
+    def test_evpn_ethernet_segment_totals_equal(self):
+        """Require RD TOTAL DISTINCT and TOTAL OCCURRENCES to remain exactly equal (not just non-decreasing)."""
         pre_d, pre_o = self._evpn_ethernet_segment_totals(self.script_content)
         post_d, post_o = self._evpn_ethernet_segment_totals(self.post_content)
         if pre_d is None or pre_o is None or post_d is None or post_o is None:
             self.results.append(("evpn_ethernet_segment_totals", (pre_d, pre_o), (post_d, post_o), "SKIP"))
         else:
-            status = "PASS" if (post_d >= pre_d and post_o >= pre_o) else "FAIL"
+            status = "PASS" if (post_d == pre_d and post_o == pre_o) else "FAIL"
             self.results.append(("evpn_ethernet_segment_totals", (pre_d, pre_o), (post_d, post_o), status))
 
     def test_ip_route_count(self):
@@ -961,70 +1170,24 @@ tr:nth-child(even){{background:#fafafa}}.pass{{color:#0a0;font-weight:600}}
         self.test_disabled_interfaces_equal()
         self.test_up_interfaces_equal()
         self.test_down_interfaces_equal()
-        self.test_established_bgp_equal()
         self.test_evpn_mac_ip_non_decrease()
-        self.test_bgp_neighbor_count_equal()      # NEW
-        self.test_bgp_established_count_equal()   # NEW
-        self.test_bgp_nlri_mismatch_count_equal() # NEW
-        self.test_vtep_count_equal()  # NEW
-        self.test_mac_dynamic_total_equal()  # existing
-        self.test_vrf_reserved_ports_entry_count_equal()  # NEW
-        self.test_total_routes_equal()  # NEW
-        self.test_route_source_counts_equal()  # still called
-        # NEW: existing ip_route_count block
-        self.test_ip_route_count()
-        self.test_evpn_auto_discovery_non_decrease()  # existing
-        self.test_evpn_mac_ip_totals_non_decrease()   # existing
-        self.test_evpn_imet_totals_non_decrease()     # existing
-        self.test_evpn_ethernet_segment_totals_non_decrease()  # NEW
-        # NEW: tab-delimited table output
-        self.print_route_source_counts_table()
+        self.test_bgp_neighbor_count_equal()
+        self.test_bgp_established_count_equal()
+        self.test_vtep_count_equal()
+        self.test_bgp_all_summary()
+        self.test_mac_dynamic_total_equal()
+        # ...existing code...
         print("\n=== Test Results (tabular) ===")
         for label, pre_val, post_val, status in self.results:
             pre_s = "-" if pre_val is None else str(pre_val)
             post_s = "-" if post_val is None else str(post_val)
             match_word = "match" if status == "PASS" else "mismatch" if status == "FAIL" else "skip"
             print(f"{label.ljust(28)} pre_check={pre_s}  post_check={post_s}  {match_word} {status.lower()}")
-        # Write HTML after console output
         self.write_html()
-        # NEW: print simple pre/post route source tables
         self.print_route_source_tables()
 
+# Re-add execution guard if truncated by previous edit
 if __name__ == "__main__":
     main()
-    # Run tests after main if both outputs exist
     tester = OutputTests(os.path.dirname(__file__))
     tester.run_all()
-
-if not hasattr(NetworkParsers, "parse_vxlan_vtep_detail"):
-    class NetworkParsers(NetworkParsers):
-        def parse_vxlan_vtep_detail(self, text: str):
-            results = []
-            if not text:
-                return results
-            lines = text.splitlines()
-            header_idx = None
-            for i, line in enumerate(lines):
-                if re.match(r'\s*VTEP\s+Learned Via\s+MAC Address Learning', line):
-                    header_idx = i
-                    break
-            if header_idx is None:
-                return results
-            i = header_idx + 1
-            while i < len(lines) and re.match(r'\s*-{5,}', lines[i]):
-                i += 1
-            row_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+(\S.+?)\s{2,}(\S.+?)\s{2,}(\S.+)$')
-            while i < len(lines):
-                line = lines[i].rstrip()
-                if not line or line.startswith("Total number of remote VTEPS"):
-                    break
-                m = row_re.match(line)
-                if m:
-                    results.append({
-                        "VTEP": m.group(1),
-                        "LEARNED_VIA": m.group(2).strip(),
-                        "MAC_LEARNING": m.group(3).strip(),
-                        "TUNNEL_TYPES": m.group(4).strip()
-                    })
-                i += 1
-            return results

@@ -202,14 +202,21 @@ class BgpStatus:
         if start is None: return []
         return [x for x in lines[start:] if x.strip()]
     def _records(self):
-        recs=[]
-        for line in self._bgp_lines():
-            low=line.lower()
-            if low.startswith("neighbor") or line.startswith("-"): continue
-            parts=re.split(r'\s{2,}',line.strip())
-            if len(parts)>=7 and parts[0].count('.')==3:
-                recs.append(parts)
-        return recs
+        """
+        Return list of tuples: (neighbor, asn, state, nlri_rcd, nlri_acc)
+        Parsed via _parse_bgp_summary_table().
+        """
+        rows = self._parse_bgp_summary_table()
+        out = []
+        for r in rows:
+            out.append((
+                r.get("NEIGHBOR"),
+                r.get("AS"),
+                (r.get("STATE") or "").strip(),
+                r.get("NLRI_RCD"),
+                r.get("NLRI_ACC"),
+            ))
+        return out
     def get_evpn_prefix_info(self):
         rows=[]
         evpn_lines=self._bgp_evpn_lines()
@@ -225,15 +232,25 @@ class BgpStatus:
                 if len(nums)>=2:
                     rows.append({"neighbor":parts[0],"pfx_rcd":int(nums[-2]),"pfx_acc":int(nums[-1])})
         return rows
-    def count_bgp_neighbors(self): return len(self._records())
-    def count_established_sessions(self): return sum(1 for r in self._records() if r[2].lower()=="established")
+    def count_bgp_neighbors(self):
+        return len(self._records())
+    def count_established_sessions(self):
+        return sum(1 for r in self._records() if r[2].lower().startswith("estab"))
     def get_nlri_info(self):
-        info=[]
-        for r in self._records():
-            try:
-                info.append({"neighbor":r[0],"received":int(r[-2]),"accepted":int(r[-1])})
-            except ValueError:
+        info = []
+        for n, a, st, rcd, acc in self._records():
+            if rcd is None and acc is None:
                 continue
+            # If one side missing, treat accepted == received
+            if rcd is None and acc is not None:
+                rcd = acc
+            if acc is None and rcd is not None:
+                acc = rcd
+            info.append({
+                "neighbor": n,
+                "received": rcd,
+                "accepted": acc
+            })
         return info
     def _print_nlri_table(self,nlri_rows):
         if not nlri_rows:
@@ -259,45 +276,88 @@ class BgpStatus:
         print("\nEVPN Prefix Table:"); print(header); print("-"*len(header))
         for r in rows:
             print(f"{r['neighbor'].ljust(n_w)}  {str(r['pfx_rcd']).rjust(r_w)}  {str(r['pfx_acc']).rjust(a_w)}")
-        print("-"*len(header))
+        print("-" * len(header))
         print(f"{'TOTAL'.ljust(n_w)}  {str(sum(r['pfx_rcd'] for r in rows)).rjust(r_w)}  {str(sum(r['pfx_acc'] for r in rows)).rjust(a_w)}")
+
+    def _parse_bgp_summary_table(self):
+        """
+        Internal robust parser for 'show bgp summary' neighbor table.
+        Returns list of dicts with keys: NEIGHBOR, AS, STATE, NLRI_RCD, NLRI_ACC.
+        """
+        results = []
+        if not self.content:
+            return results
+        lines = [l.rstrip("\r") for l in self.content.splitlines()]
+        header_idx = None
+        for i, l in enumerate(lines):
+            if "Neighbor" in l and "NLRI Rcd" in l:
+                header_idx = i
+                break
+        if header_idx is None:
+            return results
+        # Skip dashed separator lines
+        i = header_idx + 1
+        while i < len(lines) and set(lines[i].strip()) <= {"-"}:
+            i += 1
+        ip_re = re.compile(r'^\s*(\d{1,3}(?:\.\d{1,3}){3})\b')
+        while i < len(lines):
+            line = lines[i]
+            if not ip_re.match(line):
+                break
+            parts = re.split(r'\s+', line.strip())
+            if len(parts) < 4:
+                i += 1
+                continue
+            neighbor = parts[0]
+            asn = parts[1]
+            state_tok = parts[2]
+            clean_state = re.sub(r'\d', '', state_tok)
+            ls = clean_state.lower()
+            if ls.startswith("estab"):
+                state = "Established"
+            elif ls.startswith("idle"):
+                state = "Idle"
+            elif ls.startswith("active"):
+                state = "Active"
+            else:
+                state = clean_state
+            ints = [p for p in parts if p.isdigit()]
+            nlri_rcd = nlri_acc = None
+            if len(ints) >= 2:
+                nlri_rcd = int(ints[-2]); nlri_acc = int(ints[-1])
+            elif len(ints) == 1:
+                nlri_rcd = nlri_acc = int(ints[-1])
+            results.append({
+                "NEIGHBOR": neighbor,
+                "AS": asn,
+                "STATE": state,
+                "NLRI_RCD": nlri_rcd,
+                "NLRI_ACC": nlri_acc
+            })
+            i += 1
+        return results
+
     def print_bgp_status(self):
-        print("\nCommand executed:\nshow bgp summary")
-        print(f"Total BGP Neighbors: {self.count_bgp_neighbors()}")
-        print(f"Established Sessions: {self.count_established_sessions()}")
-        nlri=self.get_nlri_info()
-        self._print_nlri_table(nlri)
-        evpn=self.get_evpn_prefix_info()
-        self._print_evpn_table(evpn)
-    def print_bgp_summary_enhanced(self):
         """
-        Enhanced BGP summary output:
-        Neighbor count = <total>
-        Session state : Established = <established_total>
-        <NEIGHBOR>  NLRI Rcd = <NLRI_RCD> NLRI Acc = <NLRI_ACC>
+        Print basic BGP summary using internal parser.
         """
-        parser = _get_parser()
-        parse_fn = getattr(parser, "parse_bgp_summary", None) if parser else None
-        if not parse_fn:
-            print("\ncommand executed: show bgp summary (enhanced)")
-            print("Neighbor count = 0")
-            print("Session state : Established = 0")
-            return
-        try:
-            rows = parse_fn(getattr(self, "content", "") or "")
-        except Exception:
-            rows = _fallback_parse_bgp_summary(getattr(self, "content", "") or "")
-        estab = sum(1 for r in rows if re.sub(r"\d", "", (r.get("STATE") or "")).lower().startswith("estab"))
-        print("\ncommand executed: show bgp summary (enhanced)")
-        print(f"Neighbor count = {len(rows)}")
-        print(f"Session state : Established = {estab}")
-        for r in rows:
-            nbr = r.get("NEIGHBOR", "?")
-            rcd = r.get("NLRI_RCD")
-            acc = r.get("NLRI_ACC") if r.get("NLRI_ACC") is not None else rcd
-            rcd_s = str(rcd) if rcd is not None else "?"
-            acc_s = str(acc) if acc is not None else "?"
-            print(f"{nbr}  NLRI Rcd = {rcd_s} NLRI Acc = {acc_s}")
+        return  # REMOVED legacy output
+
+class BgpSummaryBasic:
+    def __init__(self, text: str):
+        self.text = text
+
+    def _rows(self):
+        from .cli_parsers import NetworkParsers
+        parser = NetworkParsers()
+        return parser.parse_bgp_summary(self.text)
+
+    def print_basic(self):
+        rows = self._rows()
+        neighbor_count = len(rows)
+        established_count = sum(1 for r in rows if r["STATE"].lower().startswith("estab"))
+        print("\ncommand executed: sh bgp summary")
+        print(f"Neighbor count: {neighbor_count} Established: {established_count}")
 
 # --- Added simple print helper classes (minimal) ---
 class RouteSummary:
@@ -436,10 +496,28 @@ class VXLAN:
         print("\nCommand executed:\nshow vxlan vtep detail")
         print(f"VTEP count: {len(self.vteps)}")
         if not self.vteps:
-            print("No VTEP detail data found.")
+            print("No VTEP entries parsed.")
             return
+        col_w = {
+            "VTEP": max(len("VTEP"), *(len(r["VTEP"]) for r in self.vteps)),
+            "LEARNED_VIA": max(len("LearnedVia"), *(len(r["LEARNED_VIA"]) for r in self.vteps)),
+            "MAC_LEARNING": max(len("MAC_Learn"), *(len(r["MAC_LEARNING"]) for r in self.vteps)),
+            "TUNNEL_TYPES": max(len("TunnelTypes"), *(len(r["TUNNEL_TYPES"]) for r in self.vteps)),
+        }
+        header = (
+            f"{'VTEP'.ljust(col_w['VTEP'])}  "
+            f"{'LearnedVia'.ljust(col_w['LEARNED_VIA'])}  "
+            f"{'MAC_Learn'.ljust(col_w['MAC_LEARNING'])}  "
+            f"{'TunnelTypes'.ljust(col_w['TUNNEL_TYPES'])}"
+        )
+        print(header)
+        print("-" * len(header))
         for r in self.vteps:
-            print(f"  {r['VTEP']}  LearnedVia={r['LEARNED_VIA']}  MACLearning={r['MAC_LEARNING']}  TunnelTypes={r['TUNNEL_TYPES']}")
+            print(f"{r['VTEP'].ljust(col_w['VTEP'])}  "
+                  f"{r['LEARNED_VIA'].ljust(col_w['LEARNED_VIA'])}  "
+                  f"{r['MAC_LEARNING'].ljust(col_w['MAC_LEARNING'])}  "
+                  f"{r['TUNNEL_TYPES'].ljust(col_w['TUNNEL_TYPES'])}")
+        print("-" * len(header))
 
 class MacAddressTableDynamic:
     """Wrapper / printer for 'show mac address-table dynamic'."""
@@ -490,11 +568,43 @@ class VrfReservedPorts:
         proto_w = max(len("Protocol"), *(len(e.get("PROTOCOL","")) for e in entries))
         cnt_w = len("Count")
         header = f"{'VRF'.ljust(vrf_w)}  {'Ports'.ljust(ports_w)}  {'Protocol'.ljust(proto_w)}  {'Count'.rjust(cnt_w)}"
-        print("Reserved Ports Table:")
         print(header)
         print("-" * len(header))
         for e in entries:
-            print(f"{e.get('VRF','').ljust(vrf_w)}  {e.get('PORT_STR','').ljust(ports_w)}  {e.get('PROTOCOL','').ljust(proto_w)}  {str(e.get('COUNT',0)).rjust(cnt_w)}")
+            vrf = e.get("VRF","")
+            ports = e.get("PORT_STR","")
+            proto = e.get("PROTOCOL","")
+            count = e.get("COUNT",0)
+            print(f"{vrf.ljust(vrf_w)}  {ports.ljust(ports_w)}  {proto.ljust(proto_w)}  {str(count).rjust(cnt_w)}")
         print("-" * len(header))
+        # REPLACED faulty formatted line with explicit totals
         print(f"Total Entries: {total_entries}")
         print(f"Total Reserved Ports: {total_ports}")
+
+# --- Added IPv4 summary printer class (supplement BgpSummaryBasic) ---
+class BgpSummaryIpv4:
+    """
+    Mirror logic of EVPN summary: parse neighbor table, print counts.
+    """
+    def __init__(self, content: str):
+        self.content = content or ""
+
+    def _rows(self):
+        parser = _get_parser()
+        return parser.parse_bgp_summary(self.content) if parser else []
+
+    def print(self):
+        import re
+        rows = self._rows()
+        print("\nCommand executed:\nsh bgp summary")
+        if not rows:
+            print("No BGP summary neighbor data found.")
+            return
+        estab = sum(
+            1 for r in rows
+            if re.sub(r'\d', '', r.get("STATE", "")).lower().startswith("estab")
+        )
+        neighbors = [r.get("NEIGHBOR") for r in rows if r.get("NEIGHBOR")]
+        neighbors = sorted(dict.fromkeys(neighbors))
+        print(f"Neighbor count: {len(neighbors)} Established: {estab}")
+        print(f"Neighbor IPs ({len(neighbors)}): {' '.join(neighbors)}")
