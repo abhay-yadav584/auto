@@ -397,19 +397,20 @@ class RouteSummary:
     def print(self):
         raw = self._raw_lines()
         if raw:
-            # NEW: command executed line
             print("\ncommand executed: sh ip route summary")
             print("\nIP Route Summary (raw):")
             for l in raw:
-                print(l.lstrip())  # match expected (first line unindented)
+                print(l.lstrip())
             return
-        # Fallback to existing parsed summary
         parser = _get_parser()
         rows = parser.parse_ip_route_summary(self.content) if parser else []
         print("\nRoute Summary (class):")
         if not rows:
             print("None"); return
+        # SAFEGUARD: rows should be list of dicts; never call sorted() on dict objects themselves
         for r in rows:
+            if not isinstance(r, dict):
+                continue
             src = r.get("SOURCE")
             cnt = r.get("COUNT")
             if cnt is None:
@@ -462,19 +463,30 @@ class EvpnRouteTypes:
         parser = _get_parser()
         counts = {}
         if parser:
-            for key, fn_name in {
+            mapping = {
                 "auto-discovery": "parse_bgp_evpn_route_type_auto_discovery",
                 "mac-ip": "parse_bgp_evpn_route_type_mac_ip",
                 "imet": "parse_bgp_evpn_route_type_imet",
                 "ethernet-segment": "parse_bgp_evpn_route_type_ethernet_segment",
-            }.items():
+            }
+            for key, fn_name in mapping.items():
                 fn = getattr(parser, fn_name, None)
                 if fn:
-                    counts[key] = len(fn(self.content) or [])
+                    try:
+                        data = fn(self.content) or []
+                        # If parser unexpectedly returns a dict, take its length over values; else list length.
+                        if isinstance(data, dict):
+                            counts[key] = len(data)
+                        else:
+                            counts[key] = len(data)
+                    except Exception:
+                        counts[key] = 0
         print("\nEVPN Route-Type Summary (class):")
         if not counts:
             print("None"); return
-        for k, v in counts.items():
+        # DEFENSIVE: iterate keys explicitly (avoid accidental list of dicts scenario)
+        for k in sorted(counts.keys()):
+            v = counts[k]
             print(f"{k}: {v} entries")
 
 class VXLAN:
@@ -559,25 +571,19 @@ class VrfReservedPorts:
         print("\nCommand executed:\nshow vrf reserved-ports")
         entries = self.data.get("entries", [])
         if not entries:
-            print("No reserved ports data found.")
+            print("No VRF reserved ports data found.")
             return
         total_entries = self.data.get("total_entries", len(entries))
         total_ports = self.data.get("total_ports", sum(e.get("COUNT", 0) for e in entries))
         vrf_w = max(len("VRF"), *(len(e.get("VRF","")) for e in entries))
         ports_w = max(len("Ports"), *(len(e.get("PORT_STR","")) for e in entries))
-        proto_w = max(len("Protocol"), *(len(e.get("PROTOCOL","")) for e in entries))
-        cnt_w = len("Count")
-        header = f"{'VRF'.ljust(vrf_w)}  {'Ports'.ljust(ports_w)}  {'Protocol'.ljust(proto_w)}  {'Count'.rjust(cnt_w)}"
+        cnt_w = max(len("Count"), *(len(str(e.get("COUNT",0))) for e in entries))
+        header = f"{'VRF'.ljust(vrf_w)}  {'Ports'.ljust(ports_w)}  {'Count'.rjust(cnt_w)}"
         print(header)
         print("-" * len(header))
         for e in entries:
-            vrf = e.get("VRF","")
-            ports = e.get("PORT_STR","")
-            proto = e.get("PROTOCOL","")
-            count = e.get("COUNT",0)
-            print(f"{vrf.ljust(vrf_w)}  {ports.ljust(ports_w)}  {proto.ljust(proto_w)}  {str(count).rjust(cnt_w)}")
+            print(f"{e['VRF'].ljust(vrf_w)}  {e['PORT_STR'].ljust(ports_w)}  {str(e['COUNT']).rjust(cnt_w)}")
         print("-" * len(header))
-        # REPLACED faulty formatted line with explicit totals
         print(f"Total Entries: {total_entries}")
         print(f"Total Reserved Ports: {total_ports}")
 

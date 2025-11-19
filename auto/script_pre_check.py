@@ -26,19 +26,39 @@ except Exception:
     textfsm.TextFSM = _TFSMStub  # type: ignore
     textfsm.TextFSMTemplateError = _TFSMTemplateErr  # type: ignore
 
-from auto.cli_parsers import NetworkParsers
-from auto.eos_cli import (
-    InterfacesStatusCount,
-    BgpStatus,
-    RouteSummary,
-    IgmpSnoopingQuerier,
-    VlanBrief,
-    VlanDynamic,
-    EvpnRouteTypes,
-    VXLAN,
-    MacAddressTableDynamic,
-    VrfReservedPorts  # NEW
-)
+# REPLACED failing absolute imports with hybrid relative/local imports
+try:
+    from .cli_parsers import NetworkParsers
+except Exception:
+    from cli_parsers import NetworkParsers
+
+try:
+    from .eos_cli import (
+        InterfacesStatusCount,
+        BgpStatus,
+        RouteSummary,
+        IgmpSnoopingQuerier,
+        VlanBrief,
+        VlanDynamic,
+        EvpnRouteTypes,
+        VXLAN,
+        MacAddressTableDynamic,
+        VrfReservedPorts
+    )
+except Exception:
+    from eos_cli import (
+        InterfacesStatusCount,
+        BgpStatus,
+        RouteSummary,
+        IgmpSnoopingQuerier,
+        VlanBrief,
+        VlanDynamic,
+        EvpnRouteTypes,
+        VXLAN,
+        MacAddressTableDynamic,
+        VrfReservedPorts
+    )
+
 # NOTE: Core parsing (all regex/block extraction) resides in network_parsers.py.
 # This script mainly orchestrates reading test.txt and printing formatted summaries.
 
@@ -68,7 +88,9 @@ def _print_route_summary_table(raw: str):
     start = None
     for i, l in enumerate(lines):
         low = l.lower()
-        if "#sh ip route summary" in low or "show ip route summary" in low:
+        if ("#sh ip route summary" in low or
+            "show ip route summary" in low or
+            "command executed: sh ip route summary" in low):
             start = i + 1
             break
     if start is None:
@@ -76,7 +98,9 @@ def _print_route_summary_table(raw: str):
         return
     block = []
     for l in lines[start:]:
-        if l.strip().endswith("#") and "#sh" in l:
+        if not l.strip():  # stop at first blank line
+            break
+        if l.strip().endswith("#") and "#sh" in l.lower():
             break
         block.append(l.rstrip())
     wanted = []
@@ -92,6 +116,22 @@ def _print_route_summary_table(raw: str):
     for idx, l in enumerate(wanted):
         # First line without leading spaces (as per expected snippet)
         print(l.lstrip() if idx == 0 else l)
+    # Added parsed values
+    rgx = re.compile(r'^\s*([A-Za-z][A-Za-z0-9 ()/_-]*?)\s+(\d+)\s*$')
+    allowed = {
+        "connected","static (persistent)","static (non-persistent)","VXLAN Control Service",
+        "static nexthop-group","ospf","ospfv3","bgp","isis","rip","internal","attached",
+        "aggregate","dynamic policy","gribi","Total Routes"
+    }
+    parsed = {}
+    for l in wanted:
+        m = rgx.match(l.strip())
+        if m and m.group(1) in allowed:
+            parsed[m.group(1)] = int(m.group(2))
+    if parsed:
+        print("\nIP Route Summary (values):")
+        for k in sorted(parsed):
+            print(f"{k} {parsed[k]}")
 
 def _print_igmp_snooping_querier(raw: str):
     parser = NetworkParsers()
@@ -453,8 +493,16 @@ def main():
     test_raw = ""
     if os.path.isfile(test_path):
         test_raw = open(test_path, "r", encoding="utf-8", errors="ignore").read()
-    else:
-        print("test.txt not found.")
+    # Fallback: if route summary missing, try script_output.txt
+    if "ip route summary" not in test_raw.lower():
+        fallback_path = os.path.join(os.path.dirname(__file__), "script_output.txt")
+        if os.path.isfile(fallback_path):
+            try:
+                extra = open(fallback_path, "r", encoding="utf-8", errors="ignore").read()
+                if "ip route summary" in extra.lower():
+                    test_raw += "\n" + extra
+            except Exception:
+                pass
     _buf = io.StringIO()
     _real_stdout = sys.stdout
     sys.stdout = _buf
@@ -463,9 +511,11 @@ def main():
         isc.content = test_raw
         up, down, conn, dis = _print_interface_sections(isc)
         bgp = BgpStatus(isc.content)
-        # REMOVED: bgp.print_bgp_summary_enhanced()
         _print_bgp_summary_ipv4(isc.content)
         bgp.print_bgp_status()
+        # --- ADDED: print IP route summary block ---
+        rs = RouteSummary(isc.content)
+        rs.print()
     finally:
         sys.stdout = _real_stdout
     output = _buf.getvalue()

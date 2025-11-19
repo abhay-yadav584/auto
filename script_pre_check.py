@@ -508,6 +508,12 @@ def main():
         _print_bgp_evpn_route_type_mac_ip_from_sample()
         _print_bgp_evpn_route_type_imet_from_sample()
         _print_bgp_evpn_route_type_ethernet_segment_from_sample()
+        # PRE CHECK: add explicit command executed line before route summary raw
+        print("\ncommand executed: sh ip route summary")  # NEW
+        _print_route_summary_table(isc.content)            # already present but now preceded by command line
+        _print_igmp_snooping_querier(isc.content)
+        _print_vlan_brief(isc.content)
+        _print_vlan_dynamic(isc.content)
     finally:
         sys.stdout = _real_stdout
     test_out = _buf.getvalue()
@@ -642,8 +648,17 @@ def main():
             VXLAN(isc_post.content).print_vtep_detail()
             # NEW: print MAC address-table dynamic for post_check
             MacAddressTableDynamic(isc_post.content).print()
-            # NEW: supplemental single-line variant (requested pattern)
+            VrfReservedPorts(isc_post.content).print()  # NEW: print vrf reserved-ports
             print("command executed:show mac address-table dynamic")
+            # POST CHECK: add missing route summary command + raw table
+            print("\ncommand executed: sh ip route summary")  # NEW
+            _print_route_summary_table(isc_post.content)      # NEW
+            RouteSummary(isc_post.content).print()            # existing class summary
+            IgmpSnoopingQuerier(isc_post.content).print()
+            VlanBrief(isc_post.content).print()
+            VlanDynamic(isc_post.content).print()
+            EvpnRouteTypes(isc_post.content).print_summary()
+            # ...existing code...
         finally:
             sys.stdout = _real_stdout
         post_out = _buf2.getvalue()
@@ -905,6 +920,64 @@ content)
             if m:
                 counts[m.group(1).strip()] = int(m.group(2))
         return counts
+    def _route_source_extended_counts(self, content):
+        """
+        Parse route source block extracting counts for:
+        connected, static (persistent), static (non-persistent), VXLAN Control Service,
+        static nexthop-group, ospf, bgp, External, Internal, isis, Level-1, Level-2,
+        rip, internal, attached, aggregate, dynamic policy, gribi, Total Routes.
+        Handles lines with multiple 'Label: value' pairs.
+        """
+        wanted = {
+            "connected","static (persistent)","static (non-persistent)","VXLAN Control Service",
+            "static nexthop-group","ospf","bgp","External","Internal","isis","Level-1","Level-2",
+            "rip","internal","attached","aggregate","dynamic policy","gribi","Total Routes"
+        }
+        counts = {}
+        if not content:
+            return counts
+        lines = content.splitlines()
+        # Limit to section after 'command executed: sh ip route summary' if present
+        start_idx = 0
+        for i,l in enumerate(lines):
+            if "command executed: sh ip route summary" in l:
+                start_idx = i
+                break
+        for l in lines[start_idx:]:
+            if not l.strip():
+                continue
+            # Stop if next command begins
+            if l.startswith("command executed:") and "ip route summary" not in l:
+                break
+            raw = l.rstrip()
+            # Single source with trailing count (space separated)
+            m_space = re.match(r'^([A-Za-z][A-Za-z0-9 ()/_-]*?)\s+(\d+)$', raw)
+            if m_space:
+                label = m_space.group(1).strip()
+                val = int(m_space.group(2))
+                if label in wanted:
+                    counts[label] = val
+            # Multiple colon-separated on one line
+            for label, val in re.findall(r'([A-Za-z0-9\-]+):\s*(\d+)', raw):
+                # Normalize labels to match wanted set
+                if label in wanted:
+                    counts[label] = int(val)
+        return counts
+    # ADDED: extended route source comparison test
+    def test_route_source_extended_counts_equal(self):
+        pre = self._route_source_extended_counts(self.script_content)
+        post = self._route_source_extended_counts(self.post_content)
+        expected = [
+            "connected","static (persistent)","static (non-persistent)","VXLAN Control Service",
+            "static nexthop-group","ospf","bgp","External","Internal","isis","Level-1","Level-2",
+            "rip","internal","attached","aggregate","dynamic policy","gribi","Total Routes"
+        ]
+        # If any key missing in either output -> SKIP
+        if any(k not in pre or k not in post for k in expected):
+            self.results.append(("route_source_block", pre, post, "SKIP"))
+            return
+        status = "PASS" if all(pre[k] == post[k] for k in expected) else "FAIL"
+        self.results.append(("route_source_block", pre, post, status))
 
     # Test 1: CONNECTED interfaces equal
     def test_connected_interfaces_equal(self):
@@ -965,6 +1038,12 @@ content)
             self._mac_dynamic_total(self.script_content),
             self._mac_dynamic_total(self.post_content)
         )
+
+    def test_vrf_reserved_ports_entries_equal(self):
+        """Compare 'Total Entries' extracted from vrf reserved-ports output."""
+        pre = self._vrf_reserved_ports_entry_count(self.script_content)
+        post = self._vrf_reserved_ports_entry_count(self.post_content)
+        self._record("vrf_reserved_ports_entries", pre, post)
 
     def test_bgp_all_summary(self):
         pre = self._bgp_all_summary(self.script_content)
@@ -1108,8 +1187,8 @@ content)
         print("command executed: sh ip route summary")
         order = [
             "connected","static (persistent)","static (non-persistent)","VXLAN Control Service",
-            "static nexthop-group","ospf","ospfv3","bgp","isis","rip","internal","attached",
-            "aggregate","dynamic policy","gribi","Total Routes"
+            "static nexthop-group","ospf","bgp","External","Internal","isis","Level-1","Level-2",
+            "rip","internal","attached","aggregate","dynamic policy","gribi","Total Routes"
         ]
         for k in order:
             v = sources.get(k, "-")
@@ -1174,9 +1253,11 @@ tr:nth-child(even){{background:#fafafa}}.pass{{color:#0a0;font-weight:600}}
         self.test_bgp_neighbor_count_equal()
         self.test_bgp_established_count_equal()
         self.test_vtep_count_equal()
-        self.test_bgp_all_summary()
         self.test_mac_dynamic_total_equal()
-        # ...existing code...
+        # INSERT: vrf reserved-ports Total Entries comparison
+        self.test_vrf_reserved_ports_entries_equal()
+        self.test_bgp_all_summary()
+        self.test_route_source_extended_counts_equal()  # NEW
         print("\n=== Test Results (tabular) ===")
         for label, pre_val, post_val, status in self.results:
             pre_s = "-" if pre_val is None else str(pre_val)

@@ -239,7 +239,7 @@ Configured routing protocol model: multi-agent
 VRF: default
    Route Source                                Number Of Routes
 ------------------------------------- -------------------------
-   connected                                                  4
+   connected                                                  1
    static (persistent)                                        0
    static (non-persistent)                                    0
    VXLAN Control Service                                      0

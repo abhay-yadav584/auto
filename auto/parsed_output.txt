@@ -1,0 +1,35 @@
+command executed: show interfaces status
+Number of interfaces CONNECTED: 3
+Number of interfaces DISABLED: 4
+
+command executed: show ip interface brief
+Number of interfaces UP: 4
+Number of interfaces DOWN: 1
+
+Command executed:
+sh bgp summary
+Neighbor count: 6 Established: 6
+
+command executed: sh ip route summary
+
+IP Route Summary (raw):
+connected                                                  4
+static (persistent)                                        0
+static (non-persistent)                                    0
+VXLAN Control Service                                      0
+static nexthop-group                                       0
+ospf                                                       0
+Intra-area: 0 Inter-area: 0 External-1: 0 External-2: 0   
+NSSA External-1: 0 NSSA External-2: 0                     
+ospfv3                                                     0
+bgp                                                       58
+External: 58 Internal: 0                                  
+isis                                                       0
+Level-1: 0 Level-2: 0                                     
+rip                                                        0
+internal                                                   8
+attached                                                   3
+aggregate                                                  0
+dynamic policy                                             0
+gribi                                                      0
+Total Routes                                              73

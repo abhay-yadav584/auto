@@ -1,17 +1,51 @@
 import os
 import re
-from .eos_cli import (
-    InterfacesStatusCount,
-    BgpStatus,
-    RouteSummary,
-    IgmpSnoopingQuerier,
-    VlanBrief,
-    VlanDynamic,
-    EvpnRouteTypes,
-    VXLAN,
-    MacAddressTableDynamic
-)
-# REMOVED: from cli_parsers import NetworkParsers  # circular / self-import
+import sys  # NEW
+import importlib  # NEW
+# REMOVED: from .eos_cli import (
+#     InterfacesStatusCount,
+#     BgpStatus,
+#     RouteSummary,
+#     IgmpSnoopingQuerier,
+#     VlanBrief,
+#     VlanDynamic,
+#     EvpnRouteTypes,
+#     VXLAN,
+#     MacAddressTableDynamic
+# )
+# NEW: dual-mode import (package or standalone)
+try:
+    if __package__:
+        from .eos_cli import (
+            InterfacesStatusCount,
+            BgpStatus,
+            RouteSummary,
+            IgmpSnoopingQuerier,
+            VlanBrief,
+            VlanDynamic,
+            EvpnRouteTypes,
+            VXLAN,
+            MacAddressTableDynamic
+        )
+    else:
+        raise ImportError("force fallback")
+except Exception:
+    base_dir = os.path.dirname(__file__)
+    if base_dir not in sys.path:
+        sys.path.append(base_dir)
+    try:
+        eos_cli = importlib.import_module("eos_cli")
+        InterfacesStatusCount = eos_cli.InterfacesStatusCount
+        BgpStatus = eos_cli.BgpStatus
+        RouteSummary = eos_cli.RouteSummary
+        IgmpSnoopingQuerier = eos_cli.IgmpSnoopingQuerier
+        VlanBrief = eos_cli.VlanBrief
+        VlanDynamic = eos_cli.VlanDynamic
+        EvpnRouteTypes = eos_cli.EvpnRouteTypes
+        VXLAN = eos_cli.VXLAN
+        MacAddressTableDynamic = eos_cli.MacAddressTableDynamic
+    except Exception as e:
+        print(f"[cli_parsers] fallback import failed: {e}")
 
 # NEW: safe loader / stub for NetworkParsers to avoid NameError before patching
 try:
