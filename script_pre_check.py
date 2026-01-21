@@ -120,7 +120,7 @@ def _print_route_summary_table(raw: str):
 def _print_igmp_snooping_querier(raw: str):
     parser = NetworkParsers()
     result = parser.parse_igmp_snooping_querier(raw)
-    print("\nCommand executed:\nshow igmp snooping querier")
+    print("\ncommand executed :sh igmp snooping querier")
     if not result["lines"]:
         print("No IGMP snooping querier output found.")
         return
@@ -474,6 +474,70 @@ def _print_bgp_summary_ipv4(raw: str):
     print(f"Neighbor count: {len(rows)} Established: {estab}")
     print(f"Neighbor IPs ({len(neighbors)}): {' '.join(neighbors)}")
 
+# INSERT: define VLAN brief counter BEFORE main so it's available when called
+def _count_vlans_in_show_vlan_brief_block(text: str) -> int:
+    """
+    Count VLANs in the 'show vlan brief' block within text.
+    Skips header/separator lines and counts lines starting with VLAN IDs.
+    Supports both:
+      - "Command executed:\nshow vlan brief"
+      - "command executed : show vlan brief"
+    Stops at the next command marker or prompt.
+    """
+    if not text:
+        return 0
+    lines = text.splitlines()
+    start_idx = None
+
+    # Locate command marker
+    for i in range(len(lines) - 1):
+        if lines[i].strip() == "Command executed:" and lines[i+1].strip().lower() == "show vlan brief":
+            start_idx = i + 2
+            break
+        if lines[i].strip().lower() == "command executed : show vlan brief":
+            start_idx = i + 1
+            break
+    if start_idx is None:
+        # Fallback: generic detection after "show vlan brief"
+        for i, l in enumerate(lines):
+            if "show vlan brief" in l.lower():
+                start_idx = i + 1
+                break
+    if start_idx is None:
+        return 0
+
+    # Skip header/separators to first data line
+    j = start_idx
+    while j < len(lines):
+        s = lines[j].strip()
+        if not s:
+            j += 1
+            continue
+        if set(s) <= {"-"} or re.match(r'^\s*vlan\s+name\s+status', s.lower()):
+            j += 1
+            continue
+        break
+
+    # Count VLAN rows until next command/prompt or blank after data
+    count = 0
+    vlan_line_re = re.compile(r'^\s*\d{1,4}\*?\b')
+    while j < len(lines):
+        raw = lines[j].rstrip()
+        if not raw:
+            if count > 0:
+                break
+            j += 1
+            continue
+        if raw.strip().startswith("Command executed:") or raw.strip().startswith("command executed") or raw.strip().endswith("#"):
+            break
+        if set(raw.strip()) <= {"-"}:
+            j += 1
+            continue
+        if vlan_line_re.match(raw):
+            count += 1
+        j += 1
+    return count
+
 def main():
     # Run for test.txt (existing behavior)
     test_path = os.path.join(os.path.dirname(__file__), "test.txt")
@@ -520,6 +584,12 @@ def main():
     # REMOVED _strip_plain_bgp_summary call to preserve neighbor / established lines
     # test_out = _strip_plain_bgp_summary(test_out)
     print(test_out)
+
+    # NEW: append explicit VLAN count from 'show vlan brief' for pre (script_output)
+    if test_raw:
+        pre_vlan_cnt = _count_vlans_in_show_vlan_brief_block(test_raw)
+        print(f"\nVLAN count (show vlan brief): {pre_vlan_cnt}")
+
     _write_output_file(test_out, "script_output.txt")
 
     # Run for post_check.txt (new)
@@ -665,6 +735,12 @@ def main():
         # REMOVED _strip_plain_bgp_summary call
         # post_out = _strip_plain_bgp_summary(post_out)
         print(post_out)
+
+        # NEW: append explicit VLAN count from 'show vlan brief' for post (post_check_output)
+        if post_raw:
+            post_vlan_cnt = _count_vlans_in_show_vlan_brief_block(post_raw)
+            print(f"\nVLAN count (show vlan brief): {post_vlan_cnt}")
+
         _write_output_file(post_out, "post_check_output.txt")
     else:
         print("post_check.txt not found; skipping second pass.")
@@ -1241,6 +1317,75 @@ tr:nth-child(even){{background:#fafafa}}.pass{{color:#0a0;font-weight:600}}
         except Exception as e:
             print(f"Failed writing HTML report: {e}")
 
+    # NEW: helper to extract VLAN count from 'show vlan brief' block
+    def _vlan_count(self, content: str):
+        if not content:
+            return None
+        lines = content.splitlines()
+        start = None
+        for i in range(len(lines) - 1):
+            if lines[i].strip() == "Command executed:" and lines[i+1].strip().lower() == "sh bgp summary":
+                # skip unrelated block
+                continue
+            if lines[i].strip() == "Command executed:" and lines[i+1].strip().lower() == "show vlan brief":
+                start = i + 2
+                break
+            if lines[i].strip().lower() == "command executed : show vlan brief":
+                start = i + 1
+                break
+        if start is None:
+            # fallback: find 'show vlan brief' title
+            for i, l in enumerate(lines):
+                if "show vlan brief" in l.lower():
+                    start = i + 1
+                    break
+        if start is None:
+            # fallback: look for printed total
+            m = re.search(r'\bTotal VLANs:\s*(\d+)', content)
+            return int(m.group(1)) if m else None
+
+        # Skip headers/separators
+        j = start
+        while j < len(lines):
+            s = lines[j].strip()
+            if not s:
+                j += 1
+                continue
+            if set(s) <= {"-"} or re.match(r'^\s*vlan\s+name\s+status', s.lower()):
+                j += 1
+                continue
+            break
+
+        count = 0
+        vlan_line_re = re.compile(r'^\s*\d{1,4}\*?\b')
+        while j < len(lines):
+            raw = lines[j].rstrip()
+            if not raw:
+                if count > 0:
+                    break
+                j += 1
+                continue
+            if raw.strip().startswith("Command executed:") or raw.strip().startswith("command executed") or raw.strip().endswith("#"):
+                break
+            if set(raw.strip()) <= {"-"}:
+                j += 1
+                continue
+            if vlan_line_re.match(raw):
+                count += 1
+            j += 1
+
+        if count == 0:
+            # last fallback to printed total
+            m = re.search(r'\bTotal VLANs:\s*(\d+)', content)
+            return int(m.group(1)) if m else None
+        return count
+
+    # NEW: testcase to compare VLAN counts between pre and post outputs
+    def test_vlan_counts_equal(self):
+        pre = self._vlan_count(self.script_content)
+        post = self._vlan_count(self.post_content)
+        self._record("vlan_count", pre, post)
+
     def run_all(self):
         if not self.script_content or not self.post_content:
             print("\n[Tests] SKIP: One or both output files missing.")
@@ -1258,6 +1403,8 @@ tr:nth-child(even){{background:#fafafa}}.pass{{color:#0a0;font-weight:600}}
         self.test_vrf_reserved_ports_entries_equal()
         self.test_bgp_all_summary()
         self.test_route_source_extended_counts_equal()  # NEW
+        # INSERT: VLAN count equality test
+        self.test_vlan_counts_equal()
         print("\n=== Test Results (tabular) ===")
         for label, pre_val, post_val, status in self.results:
             pre_s = "-" if pre_val is None else str(pre_val)

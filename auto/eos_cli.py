@@ -1,5 +1,6 @@
 import os
 import re
+from typing import List, Dict
 
 __all__ = [
     "InterfacesStatusCount",
@@ -71,13 +72,16 @@ def _fallback_parse_bgp_summary(text: str):
     return results
 
 def _get_parser():
-    """Lazy loader to avoid circular import with cli_parsers. Adds fallback if textfsm unavailable."""
+    """Lazy loader for NetworkParsers. Prefer network_parsers.py to avoid circular imports."""
     parser = None
     try:
-        from .cli_parsers import NetworkParsers
+        # Prefer the real parser module (where parse_* methods should live)
+        from .network_parsers import NetworkParsers  # type: ignore
         parser = NetworkParsers()
     except Exception:
+        # Fallback: no parser available (keep runtime safe)
         parser = None
+
     # Patch parse_bgp_summary if TextFSM missing or raises AttributeError
     if parser:
         need_fallback = False
@@ -348,9 +352,8 @@ class BgpSummaryBasic:
         self.text = text
 
     def _rows(self):
-        from .cli_parsers import NetworkParsers
-        parser = NetworkParsers()
-        return parser.parse_bgp_summary(self.text)
+        parser = _get_parser()
+        return parser.parse_bgp_summary(self.text) if parser else []
 
     def print_basic(self):
         rows = self._rows()
@@ -421,13 +424,16 @@ class RouteSummary:
 class IgmpSnoopingQuerier:
     def __init__(self, content: str):
         self.content = content or ""
+
     def print(self):
         parser = _get_parser()
-        result = parser.parse_igmp_snooping_querier(self.content) if parser else {"lines": [], "vlan_count": 0}
+        parse_fn = getattr(parser, "parse_igmp_snooping_querier", None) if parser else None
+        result = parse_fn(self.content) if parse_fn else {"lines": [], "vlan_count": 0}
         print("\nIGMP Snooping Querier (class):")
         lines = result.get("lines", [])
         if not lines:
-            print("None"); return
+            print("None")
+            return
         for l in lines:
             print(l)
         print(f"VLAN count: {result.get('vlan_count')}")
@@ -435,30 +441,45 @@ class IgmpSnoopingQuerier:
 class VlanBrief:
     def __init__(self, content: str):
         self.content = content or ""
+
     def print(self):
+        print("\ncommand executed : show vlan brief")
         parser = _get_parser()
-        rows = parser.parse_vlan_brief(self.content) if parser else []
+        parse_fn = getattr(parser, "parse_vlan_brief", None) if parser else None
+        rows = parse_fn(self.content) if parse_fn else []
         print("\nVLAN Brief (class):")
         if not rows:
-            print("None"); return
+            # Fallback: derive total from raw block
+            total = _count_vlans_in_show_vlan_brief_block(self.content)
+            if total:
+                print(f"Total VLANs: {total}")
+            else:
+                print("None")
+            return
         for r in rows:
             print(f"{r.get('VLAN')} {r.get('NAME')} {r.get('STATUS')} {r.get('PORTS')}")
+        # Also print total when rows exist
+        print(f"Total VLANs: {len(rows)}")
 
 class VlanDynamic:
     def __init__(self, content: str):
         self.content = content or ""
+
     def print(self):
         parser = _get_parser()
-        rows = parser.parse_vlan_dynamic(self.content) if parser else []
+        parse_fn = getattr(parser, "parse_vlan_dynamic", None) if parser else None
+        rows = parse_fn(self.content) if parse_fn else []
         print("\nVLAN Dynamic (class):")
         if not rows:
-            print("None"); return
+            print("None")
+            return
         for r in rows:
             print(f"{r.get('VLAN')} {r.get('NAME')} {r.get('STATUS')} {r.get('PORTS')}")
 
 class EvpnRouteTypes:
     def __init__(self, content: str):
         self.content = content or ""
+
     def print_summary(self):
         parser = _get_parser()
         counts = {}
@@ -471,19 +492,18 @@ class EvpnRouteTypes:
             }
             for key, fn_name in mapping.items():
                 fn = getattr(parser, fn_name, None)
-                if fn:
-                    try:
-                        data = fn(self.content) or []
-                        # If parser unexpectedly returns a dict, take its length over values; else list length.
-                        if isinstance(data, dict):
-                            counts[key] = len(data)
-                        else:
-                            counts[key] = len(data)
-                    except Exception:
-                        counts[key] = 0
+                if not fn:
+                    counts[key] = 0
+                    continue
+                try:
+                    data = fn(self.content) or []
+                    counts[key] = len(data) if not isinstance(data, dict) else len(data)
+                except Exception:
+                    counts[key] = 0
         print("\nEVPN Route-Type Summary (class):")
         if not counts:
-            print("None"); return
+            print("None")
+            return
         # DEFENSIVE: iterate keys explicitly (avoid accidental list of dicts scenario)
         for k in sorted(counts.keys()):
             v = counts[k]
@@ -614,3 +634,118 @@ class BgpSummaryIpv4:
         neighbors = sorted(dict.fromkeys(neighbors))
         print(f"Neighbor count: {len(neighbors)} Established: {estab}")
         print(f"Neighbor IPs ({len(neighbors)}): {' '.join(neighbors)}")
+
+def parse_vlan_brief_from_text(raw: str) -> List[Dict[str, str]]:
+    """
+    Parse 'show vlan brief' block from a raw EOS text dump.
+    Returns list of dicts: { vlan, name, status, interfaces }
+    """
+    # Find the block starting at a line that looks like the command title
+    # Accept both "show vlan brief" and "sh vlan brief"
+    cmd_idx = None
+    lines = raw.splitlines()
+    for i, ln in enumerate(lines):
+        if re.search(r'\b(sh|show)\s+vlan\s+brief\b', ln, re.IGNORECASE):
+            cmd_idx = i
+            break
+    if cmd_idx is None:
+        return []
+
+    # Collect lines until next blank section or next "Command executed"/title
+    block = []
+    for ln in lines[cmd_idx + 1:]:
+        if re.search(r'^\s*Command executed:|^\s*(sh|show)\s+\S+', ln, re.IGNORECASE):
+            break
+        block.append(ln)
+
+    # Heuristic parse VLAN lines like:
+    # "1400 NON-PROD-EXTERNAL-MPF02-TRANSIT active Cpu, Po1027, Vx1"
+    entries = []
+    for ln in block:
+        m = re.match(r'^\s*(\d+)\s+(\S.*?)\s+(active|act/lshut|suspend|inactive)\s*(.*)$', ln, re.IGNORECASE)
+        if m:
+            vlan, name, status, ifs = m.groups()
+            entries.append({
+                "vlan": vlan.strip(),
+                "name": name.strip(),
+                "status": status.strip(),
+                "interfaces": ifs.strip()
+            })
+    return entries
+
+def print_vlan_brief(entries: List[Dict[str, str]]) -> str:
+    """
+    Return formatted VLAN Brief section string.
+    """
+    if not entries:
+        return "VLAN Brief (parsed from test.txt): None"
+    out = ["VLAN Brief (parsed from test.txt):"]
+    for e in entries:
+        line = f"{e['vlan']}  {e['name']} {e['status']}"
+        if e['interfaces']:
+            line += f"  {e['interfaces']}"
+        out.append(line)
+    return "\n".join(out)
+
+def _count_vlans_in_show_vlan_brief_block(text: str) -> int:
+    """
+    Count VLANs in the 'show vlan brief' block within text.
+    Supports both:
+      - "Command executed:\nshow vlan brief"
+      - "command executed : show vlan brief"
+    Skips header/separator lines and counts lines starting with VLAN IDs.
+    """
+    if not text:
+        return 0
+    lines = text.splitlines()
+    start_idx = None
+
+    # Locate command marker variants
+    for i in range(len(lines) - 1):
+        if lines[i].strip() == "Command executed:" and lines[i+1].strip().lower() == "show vlan brief":
+            start_idx = i + 2
+            break
+        if lines[i].strip().lower() == "command executed : show vlan brief":
+            start_idx = i + 1
+            break
+
+    if start_idx is None:
+        # Fallback: first occurrence of "show vlan brief"
+        for i, l in enumerate(lines):
+            if "show vlan brief" in l.lower():
+                start_idx = i + 1
+                break
+    if start_idx is None:
+        return 0
+
+    # Skip header/separators to first data line
+    j = start_idx
+    while j < len(lines):
+        s = lines[j].strip()
+        if not s:
+            j += 1
+            continue
+        if set(s) <= {"-"} or re.match(r'^\s*vlan\s+name\s+status', s.lower()):
+            j += 1
+            continue
+        break
+
+    # Count VLAN rows until next command/prompt or blank after data
+    count = 0
+    vlan_line_re = re.compile(r'^\s*\d{1,4}\*?\b')
+    while j < len(lines):
+        raw = lines[j].rstrip()
+        if not raw:
+            if count > 0:
+                break
+            j += 1
+            continue
+        if raw.strip().startswith("Command executed:") or raw.strip().startswith("command executed") or raw.strip().endswith("#"):
+            break
+        if set(raw.strip()) <= {"-"}:
+            j += 1
+            continue
+        if vlan_line_re.match(raw):
+            count += 1
+        j += 1
+    return count
