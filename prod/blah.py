@@ -68,6 +68,12 @@ def parse_with_regex(input_path: Path):
                 s = s.strip()
                 s = re.sub(r'^directly connected,?\s*', '', s, flags=re.I)
                 s = re.sub(r'^via\s+', '', s, flags=re.I)
+                # treat VTEP specially (format as "VTEP (ip)")
+                if 'VTEP' in s.upper():
+                    ip_m_v = re.search(r'(\d+\.\d+\.\d+\.\d+)', s)
+                    if ip_m_v:
+                        return f"VTEP ({ip_m_v.group(1)})"
+                    return 'VTEP'
                 # extract interface (Ethernet49/1, Vlan1304, Loopback0, Null0, Port-Channel1)
                 int_m = re.search(r'([A-Za-z-]+\d+[A-Za-z0-9/\-]*)', s)
                 ip_m = re.search(r'(\d+\.\d+\.\d+\.\d+)', s)
@@ -175,6 +181,35 @@ def main():
         df.to_csv(fallback, index=False)
         wrote_csv = fallback
         print(f'Warning: Could not write {out_csv}; wrote to {fallback} instead')
+
+    # If an existing parsed_routes.csv exists, merge/appent deduplicating rows
+    # This ensures newly parsed VRFs (e.g., CMN-PROD-LE) are added to the same CSV
+    try:
+        if out_csv.exists():
+            # read existing and combine
+            try:
+                existing = pd.read_csv(out_csv, dtype=str)
+            except Exception:
+                existing = None
+            if existing is not None:
+                # ensure same columns
+                cols = list(df.columns)
+                existing = existing.reindex(columns=cols)
+                combined = pd.concat([existing, df], ignore_index=True)
+                # drop exact duplicate rows
+                combined = combined.drop_duplicates()
+                # write combined back
+                try:
+                    combined.to_csv(out_csv, index=False)
+                    wrote_csv = out_csv
+                except PermissionError:
+                    fallback = out_dir / f'parsed_routes_{timestamp}.csv'
+                    combined.to_csv(fallback, index=False)
+                    wrote_csv = fallback
+                    print(f'Warning: Could not write merged {out_csv}; wrote to {fallback} instead')
+    except Exception:
+        # non-fatal, we already wrote df above or to a fallback
+        pass
 
     try:
         with out_md.open('w', encoding='utf-8') as md:
